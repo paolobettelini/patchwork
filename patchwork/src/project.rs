@@ -1,0 +1,270 @@
+use crate::codegen;
+use crate::error::{PatchworkError, Result};
+use crate::model::ModInfo;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const CARGO_TOML_TEMPLATE: &str = include_str!("../../template/Cargo.toml");
+const MAIN_RS_TEMPLATE: &str = include_str!("../../template/src/main.rs");
+const TEMPLATE_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../template/assets");
+
+pub fn create_project(
+    cache_folder: &Path,
+    project_name: &str,
+    mods_folder: &Path,
+    modpacks_folder: &Path,
+    modpack: &Path,
+    mods: Vec<(String, ModInfo)>,
+    provider_map: HashMap<String, String>,
+    owned_objects: HashSet<String>,
+) -> Result<()> {
+    let project_dir = cache_folder.join(project_name);
+
+    if project_dir.exists() {
+        fs::remove_dir_all(&project_dir).map_err(|source| {
+            PatchworkError::io("remove existing composed project", &project_dir, source)
+        })?;
+    }
+
+    fs::create_dir_all(project_dir.join("src")).map_err(|source| {
+        PatchworkError::io("create composed src directory", &project_dir, source)
+    })?;
+    fs::create_dir_all(project_dir.join("src").join("generated")).map_err(|source| {
+        PatchworkError::io(
+            "create composed generated directory",
+            project_dir.join("src").join("generated"),
+            source,
+        )
+    })?;
+    fs::write(project_dir.join("src").join("generated").join("mod.rs"), "").map_err(|source| {
+        PatchworkError::io(
+            "write generated module marker",
+            project_dir.join("src").join("generated").join("mod.rs"),
+            source,
+        )
+    })?;
+    fs::write(project_dir.join("src").join("main.rs"), MAIN_RS_TEMPLATE).map_err(|source| {
+        PatchworkError::io(
+            "write composed main.rs template",
+            project_dir.join("src").join("main.rs"),
+            source,
+        )
+    })?;
+    copy_project_assets(&project_dir, mods_folder, &mods)?;
+
+    let dependencies = mods
+        .iter()
+        .map(|(modname, _modinfo)| {
+            let modpath = mods_folder
+                .join(modname)
+                .canonicalize()
+                .map_err(|source| {
+                    PatchworkError::io(
+                        "canonicalize selected mod path",
+                        mods_folder.join(modname),
+                        source,
+                    )
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            Ok(format!("{} = {{ path = \"{}\" }}", modname, modpath))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
+
+    let cargo_toml = CARGO_TOML_TEMPLATE
+        .replace("#PLACEHOLDER", &dependencies)
+        .replace(
+            "name = \"template\"",
+            &format!("name = \"{}\"", project_name),
+        );
+
+    fs::write(project_dir.join("Cargo.toml"), cargo_toml).map_err(|source| {
+        PatchworkError::io(
+            "write composed Cargo.toml",
+            project_dir.join("Cargo.toml"),
+            source,
+        )
+    })?;
+
+    let init_mods_glue = mods
+        .iter()
+        .map(|(modname, modinfo)| {
+            let name = modname.replace('-', "_");
+            let entry = &modinfo.entry;
+            let params = generate_mut_params(&modinfo.dependencies.init, &provider_map);
+
+            format!(
+                "
+                let mut {} = {}::{}::init({});
+                ",
+                name, name, entry, params
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let arc_wrappers_glue = mods
+        .iter()
+        .filter(|(modname, _)| !owned_objects.contains(modname))
+        .map(|(modname, _modinfo)| {
+            let name = modname.replace('-', "_");
+
+            format!(
+                "
+                let {} = Arc::new({});
+                ",
+                name, name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let run_mods_glue = mods
+        .iter()
+        .map(|(modname, modinfo)| {
+            let name = modname.replace('-', "_");
+            let params = generate_run_params(
+                &modinfo.dependencies.run,
+                &modinfo.dependencies.ownership,
+                &provider_map,
+            );
+
+            format!(
+                "
+                let mod_handles = {}.run({});
+                if let Some(vec) = mod_handles {{
+                    handles.extend(vec);
+                }}
+            ",
+                name, params
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let code = format!(
+        "{}\n{}\n{}",
+        init_mods_glue, arc_wrappers_glue, run_mods_glue
+    );
+    let main_rs = MAIN_RS_TEMPLATE.replace("//PLACEHOLDER", &code);
+    fs::write(project_dir.join("src").join("main.rs"), main_rs).map_err(|source| {
+        PatchworkError::io(
+            "write composed main.rs",
+            project_dir.join("src").join("main.rs"),
+            source,
+        )
+    })?;
+
+    let codegen_tasks = codegen::resolve_tasks(cache_folder, mods_folder, &mods)?;
+    codegen::run_tasks(
+        &project_dir,
+        mods_folder,
+        modpacks_folder,
+        modpack,
+        &codegen_tasks,
+    )?;
+    codegen::patch_generated_crates(&project_dir, &codegen_tasks)?;
+
+    Ok(())
+}
+
+fn copy_project_assets(
+    template_dir: &Path,
+    mods_folder: &Path,
+    mods: &[(String, ModInfo)],
+) -> Result<()> {
+    let output_assets = template_dir.join("assets");
+    fs::create_dir_all(&output_assets).map_err(|source| {
+        PatchworkError::io("create composed assets directory", &output_assets, source)
+    })?;
+
+    let template_assets = PathBuf::from(TEMPLATE_ASSETS_DIR);
+    if template_assets.is_dir() {
+        copy_directory_contents(&template_assets, &output_assets)?;
+    }
+
+    for (modname, _) in mods {
+        let mod_assets = mods_folder.join(modname).join("assets");
+        if !mod_assets.is_dir() {
+            continue;
+        }
+
+        let mod_output_assets = output_assets.join(modname);
+        fs::create_dir_all(&mod_output_assets).map_err(|source| {
+            PatchworkError::io(
+                "create composed mod assets directory",
+                &mod_output_assets,
+                source,
+            )
+        })?;
+        copy_directory_contents(&mod_assets, &mod_output_assets)?;
+    }
+
+    Ok(())
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source)
+        .map_err(|source_error| PatchworkError::io("read assets directory", source, source_error))?
+    {
+        let entry = entry.map_err(|source_error| {
+            PatchworkError::io("read asset directory entry", source, source_error)
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|source_error| {
+            PatchworkError::io("read asset file type", &source_path, source_error)
+        })?;
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path).map_err(|source_error| {
+                PatchworkError::io("create asset directory", &destination_path, source_error)
+            })?;
+            copy_directory_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).map_err(|source_error| {
+                PatchworkError::io("copy asset file", &source_path, source_error)
+            })?;
+        } else {
+            return Err(PatchworkError::UnsupportedAssetEntry { path: source_path });
+        }
+    }
+
+    Ok(())
+}
+
+fn generate_mut_params(dependencies: &[String], provider_map: &HashMap<String, String>) -> String {
+    dependencies
+        .iter()
+        .map(|dep| {
+            let modname = provider_map.get(dep).unwrap_or(dep);
+            let modname = modname.replace('-', "_");
+            format!("&mut {}", modname)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn generate_run_params(
+    run_deps: &[String],
+    ownership_deps: &[String],
+    provider_map: &HashMap<String, String>,
+) -> String {
+    let run_params = run_deps.iter().map(|dep| {
+        let modname = provider_map.get(dep).unwrap_or(dep);
+        let modname = modname.replace('-', "_");
+        format!("{}.clone()", modname)
+    });
+
+    let ownership_params = ownership_deps.iter().map(|dep| {
+        let modname = provider_map.get(dep).unwrap_or(dep);
+        modname.replace('-', "_")
+    });
+
+    run_params
+        .chain(ownership_params)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
