@@ -344,7 +344,7 @@ fn list_modpacks(state: State<AppState>) -> Result<Vec<LauncherModpack>, String>
         .map_err(|_| "launcher settings lock is poisoned".to_string())?
         .clone();
     ensure_settings_dirs(&settings).map_err(|error| error.to_string())?;
-    read_modpacks(Path::new(&settings.profiles_dir)).map_err(|error| error.to_string())
+    read_modpacks(&settings).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -443,7 +443,7 @@ fn create_modpack(
         return Err("Modpack ID must contain at least one letter or number".to_string());
     }
 
-    let existing = read_modpacks(profiles_dir).map_err(|error| error.to_string())?;
+    let existing = read_modpacks(&settings).map_err(|error| error.to_string())?;
     if existing
         .iter()
         .any(|modpack| modpack.id.eq_ignore_ascii_case(&id))
@@ -472,7 +472,7 @@ fn create_modpack(
         copy_icon_to_profile(&PathBuf::from(icon_path), profiles_dir, &id)?;
     }
 
-    read_modpack_file(&path).map_err(|error| error.to_string())
+    read_modpack_file(&path, &settings).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -522,7 +522,7 @@ fn import_modpack(state: State<AppState>) -> Result<Option<LauncherModpack>, Str
         copy_icon_to_profile(&source_icon, profiles_dir, &id)?;
     }
 
-    read_modpack_file(&destination)
+    read_modpack_file(&destination, &settings)
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -891,7 +891,7 @@ fn select_modpack_icon(
 
     copy_icon_to_profile(&source, profiles_dir, &id)?;
 
-    read_modpack_file(&modpack_path)
+    read_modpack_file(&modpack_path, &settings)
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -995,7 +995,8 @@ fn save_settings_pointer(path: &Path, settings_path: &Path) -> Result<(), io::Er
     fs::write(path, json)
 }
 
-fn read_modpacks(modpacks_dir: &Path) -> Result<Vec<LauncherModpack>, io::Error> {
+fn read_modpacks(settings: &LauncherSettings) -> Result<Vec<LauncherModpack>, io::Error> {
+    let modpacks_dir = Path::new(&settings.profiles_dir);
     fs::create_dir_all(modpacks_dir)?;
     let mut modpacks = Vec::new();
 
@@ -1009,7 +1010,7 @@ fn read_modpacks(modpacks_dir: &Path) -> Result<Vec<LauncherModpack>, io::Error>
         {
             continue;
         }
-        match read_modpack_file(&path) {
+        match read_modpack_file(&path, settings) {
             Ok(modpack) => modpacks.push(modpack),
             Err(error) => eprintln!("Skipping unreadable modpack '{}': {error}", path.display()),
         }
@@ -1019,7 +1020,10 @@ fn read_modpacks(modpacks_dir: &Path) -> Result<Vec<LauncherModpack>, io::Error>
     Ok(modpacks)
 }
 
-fn read_modpack_file(path: &Path) -> Result<LauncherModpack, io::Error> {
+fn read_modpack_file(
+    path: &Path,
+    settings: &LauncherSettings,
+) -> Result<LauncherModpack, io::Error> {
     let id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -1050,7 +1054,14 @@ fn read_modpack_file(path: &Path) -> Result<LauncherModpack, io::Error> {
         .transpose()?
         .unwrap_or_else(|| "none".to_string());
 
-    let dependency_count = distinct_dependency_count(&parsed.modpacks, &parsed.mods);
+    let dependency_count = patchwork::inspect_dependency_page(
+        patchwork::DependencyTarget::Profile { id: &id },
+        Path::new(&settings.mod_cache),
+        Path::new(&settings.modpacks_cache),
+        Path::new(&settings.profiles_dir),
+    )
+    .map(|page| page.distinct_dependency_count)
+    .unwrap_or_else(|_| distinct_dependency_count(&parsed.modpacks, &parsed.mods));
 
     Ok(LauncherModpack {
         id: id.clone(),
