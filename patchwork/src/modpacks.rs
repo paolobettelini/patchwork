@@ -285,14 +285,17 @@ fn read_mod_info(mods_folder: &Path, mod_name: &str) -> Result<ModInfo> {
     let manifest: CargoManifest = toml::from_str(&manifest_source)
         .map_err(|source| PatchworkError::parse_toml("mod Cargo.toml", &manifest_path, source))?;
 
-    manifest
-        .package
-        .metadata
-        .mod_info
-        .ok_or_else(|| PatchworkError::MissingModMetadata {
-            mod_name: mod_name.to_string(),
-            manifest_path,
-        })
+    let mod_info =
+        manifest
+            .package
+            .metadata
+            .mod_info
+            .ok_or_else(|| PatchworkError::MissingModMetadata {
+                mod_name: mod_name.to_string(),
+                manifest_path: manifest_path.clone(),
+            })?;
+    mod_info.validate(mod_name, &manifest_path)?;
+    Ok(mod_info)
 }
 
 fn validate_mod_name(mod_name: &str, context: &'static str) -> Result<()> {

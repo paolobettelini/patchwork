@@ -182,7 +182,16 @@ fn resolve_dependency_name(
     mods_map: &HashMap<String, ModInfo>,
     provider_map: &HashMap<String, String>,
 ) -> Result<String> {
-    if mods_map.contains_key(dep) {
+    if mods_map.get(dep).map(|info| info.support).unwrap_or(false) {
+        if let Some(provider) = provider_map.get(dep) {
+            Ok(provider.clone())
+        } else {
+            Err(PatchworkError::MissingDependency {
+                dependent_mod: dependent_mod.to_string(),
+                dependency: dep.to_string(),
+            })
+        }
+    } else if mods_map.contains_key(dep) {
         Ok(dep.to_string())
     } else if let Some(provider) = provider_map.get(dep) {
         Ok(provider.clone())

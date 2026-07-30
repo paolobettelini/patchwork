@@ -90,9 +90,12 @@ pub fn create_project(
 
     let init_mods_glue = mods
         .iter()
+        .filter(|(_, modinfo)| modinfo.has_lifecycle())
         .map(|(modname, modinfo)| {
             let name = modname.replace('-', "_");
-            let entry = &modinfo.entry;
+            let entry = modinfo
+                .entry_type()
+                .expect("lifecycle mod should declare an entry type");
             let params = generate_mut_params(&modinfo.dependencies.init, &provider_map);
 
             format!(
@@ -107,7 +110,7 @@ pub fn create_project(
 
     let arc_wrappers_glue = mods
         .iter()
-        .filter(|(modname, _)| !owned_objects.contains(modname))
+        .filter(|(modname, modinfo)| modinfo.has_lifecycle() && !owned_objects.contains(modname))
         .map(|(modname, _modinfo)| {
             let name = modname.replace('-', "_");
 
@@ -123,6 +126,7 @@ pub fn create_project(
 
     let run_mods_glue = mods
         .iter()
+        .filter(|(_, modinfo)| modinfo.has_lifecycle())
         .map(|(modname, modinfo)| {
             let name = modname.replace('-', "_");
             let params = generate_run_params(

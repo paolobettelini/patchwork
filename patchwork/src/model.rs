@@ -1,4 +1,7 @@
 use serde::Deserialize;
+use std::path::Path;
+
+use crate::error::{PatchworkError, Result};
 
 #[derive(Debug, Deserialize)]
 pub struct Modpack {
@@ -28,12 +31,56 @@ pub struct Dependencies {
 
 #[derive(Debug, Deserialize)]
 pub struct ModInfo {
-    pub entry: String,
+    #[serde(default)]
+    pub entry: Option<String>,
+    #[serde(default)]
     pub dependencies: Dependencies,
     #[serde(default)]
     pub provides: Option<String>,
     #[serde(default)]
+    pub support: bool,
+    #[serde(default)]
     pub codegen: Vec<CodegenDeclaration>,
+}
+
+impl ModInfo {
+    pub fn validate(&self, mod_name: &str, manifest_path: &Path) -> Result<()> {
+        if self.support {
+            if self.entry.is_some() {
+                return Err(PatchworkError::InvalidModMetadata {
+                    mod_name: mod_name.to_string(),
+                    manifest_path: manifest_path.to_path_buf(),
+                    reason: "support mods must not declare entry".to_string(),
+                });
+            }
+
+            if self.provides.is_some() {
+                return Err(PatchworkError::InvalidModMetadata {
+                    mod_name: mod_name.to_string(),
+                    manifest_path: manifest_path.to_path_buf(),
+                    reason:
+                        "support mods must not declare provides; use a normal mod as the provider"
+                            .to_string(),
+                });
+            }
+        } else if self.entry.is_none() {
+            return Err(PatchworkError::InvalidModMetadata {
+                mod_name: mod_name.to_string(),
+                manifest_path: manifest_path.to_path_buf(),
+                reason: "non-support mods must declare entry".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn entry_type(&self) -> Option<&str> {
+        self.entry.as_deref()
+    }
+
+    pub fn has_lifecycle(&self) -> bool {
+        !self.support
+    }
 }
 
 #[derive(Debug, Deserialize)]

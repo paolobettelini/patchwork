@@ -42,6 +42,7 @@ Each selectable mod is a Cargo crate with metadata in its `Cargo.toml`:
 [package.metadata.mod]
 entry = "EntryType"
 provides = "optional-api-name"
+support = false
 
 [package.metadata.mod.dependencies]
 init = []
@@ -49,8 +50,12 @@ run = []
 ownership = []
 ```
 
-- `entry`: Rust type used by the generated glue code.
+- `entry`: Rust type used by the generated glue code. Required unless
+  `support = true`.
 - `provides`: optional API name implemented by this mod.
+- `support`: set to `true` for a selected support mod with no lifecycle object.
+  Support mods are included as Cargo dependencies and can contribute assets or
+  codegen, but Patchwork does not call `init()` or `run()` for them.
 - `init`: dependencies passed to `EntryType::init()` as `&mut T`.
 - `run`: dependencies passed to `EntryType::run()` as `Arc<T>`.
 - `ownership`: dependencies moved into `run()` by value.
@@ -61,7 +66,16 @@ then type-checks the composed program.
 
 ## APIs and providers
 
-API crates contain traits and shared types. A concrete mod can provide an API:
+API crates contain traits and shared types. If an API crate should appear as a
+selectable/clickable Patchwork mod, declare it as a support mod:
+
+```toml
+[package.metadata.mod]
+support = true
+```
+
+Support mods do not declare `entry` or `provides`. A concrete lifecycle mod
+provides the API:
 
 ```toml
 [package.metadata.mod]

@@ -44,6 +44,11 @@ pub enum PatchworkError {
         mod_name: String,
         manifest_path: PathBuf,
     },
+    InvalidModMetadata {
+        mod_name: String,
+        manifest_path: PathBuf,
+        reason: String,
+    },
     DuplicateProvider {
         api: String,
         first_provider: String,
@@ -97,6 +102,7 @@ impl PatchworkError {
             PatchworkError::InvalidModName { .. } => "invalid_mod_name",
             PatchworkError::MissingModManifest { .. } => "missing_mod_manifest",
             PatchworkError::MissingModMetadata { .. } => "missing_mod_metadata",
+            PatchworkError::InvalidModMetadata { .. } => "invalid_mod_metadata",
             PatchworkError::DuplicateProvider { .. } => "duplicate_provider",
             PatchworkError::OwnershipConflict { .. } => "ownership_conflict",
             PatchworkError::MissingDependency { .. } => "missing_dependency",
@@ -198,6 +204,15 @@ impl fmt::Display for PatchworkError {
             } => write!(
                 f,
                 "missing [package.metadata.mod] for mod '{mod_name}': {}",
+                manifest_path.display()
+            ),
+            PatchworkError::InvalidModMetadata {
+                mod_name,
+                manifest_path,
+                reason,
+            } => write!(
+                f,
+                "invalid [package.metadata.mod] for mod '{mod_name}' at {}: {reason}",
                 manifest_path.display()
             ),
             PatchworkError::DuplicateProvider {

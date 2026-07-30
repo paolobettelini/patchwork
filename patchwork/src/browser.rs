@@ -433,8 +433,9 @@ fn read_mod_summary(id: &str, mods_folder: &Path) -> Result<ModSummary> {
             .mod_info
             .ok_or_else(|| PatchworkError::MissingModMetadata {
                 mod_name: id.to_string(),
-                manifest_path,
+                manifest_path: manifest_path.clone(),
             })?;
+    info.validate(id, &manifest_path)?;
     Ok(ModSummary {
         name: manifest.package.name,
         info,
