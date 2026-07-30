@@ -229,11 +229,11 @@ button {
 .topbar {
   position: relative;
   display: flex;
-  min-height: 74px;
+  min-height: 82px;
   align-items: center;
   justify-content: flex-start;
   gap: 14px;
-  padding: 12px 18px 11px;
+  padding: 17px 18px 13px;
   border-bottom: 1px dashed var(--line-strong);
   background: var(--topbar-bg);
   backdrop-filter: blur(18px);
@@ -312,6 +312,45 @@ button {
   color: var(--ink);
   background: var(--surface);
   box-shadow: 0 8px 18px rgba(32, 33, 42, 0.08);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.sign-in-button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-radius: 8px;
+  color: #06180f;
+  background: linear-gradient(90deg, #78f4a6 0%, #22c968 100%);
+  box-shadow: 0 10px 24px rgba(34, 201, 104, 0.22);
+  cursor: pointer;
+  font-weight: 800;
+  white-space: nowrap;
+  transition: filter 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.sign-in-button:hover {
+  filter: brightness(1.05) saturate(1.04);
+  box-shadow: 0 12px 28px rgba(34, 201, 104, 0.28);
+}
+
+.sign-in-button:active {
+  transform: translateY(1px);
+}
+
+.sign-in-button .icon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2.15;
 }
 
 .icon {
@@ -571,6 +610,8 @@ h2 {
   width: min(680px, 58vw);
   height: auto;
   display: block;
+  transform: translateX(-3.5%);
+  transform-origin: left center;
   filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.2));
 }
 
@@ -1352,15 +1393,16 @@ h2 {
 }
 
 .sew-action-icon {
-  width: 29px;
-  height: 29px;
-  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   object-fit: contain;
-  filter: contrast(1.08) saturate(1.06);
-  image-rendering: auto;
-  backface-visibility: hidden;
-  transform: translateZ(0) scale(1.04);
-  transform-origin: center;
+
+  filter:
+    drop-shadow(0.6px 0 0 #222)
+    drop-shadow(-0.6px 0 0 #222)
+    drop-shadow(0 0.6px 0 #222)
+    drop-shadow(0 -0.6px 0 #222);
 }
 
 .settings-layout {
@@ -1877,6 +1919,12 @@ input:focus {
     display: none;
   }
 
+  .topbar-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
   .workspace {
     min-height: 760px;
   }
@@ -1923,7 +1971,7 @@ input:focus {
   }
 
   .welcome-text-stack {
-    justify-items: center;
+    justify-items: start;
   }
 
   .welcome-wordmark {

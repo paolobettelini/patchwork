@@ -32,6 +32,17 @@ pub(crate) fn SearchIcon() -> impl IntoView {
 }
 
 #[component]
+pub(crate) fn ArrowRightToBracketIcon() -> impl IntoView {
+    view! {
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+            <path d="m10 17 5-5-5-5"></path>
+            <path d="M15 12H3"></path>
+        </svg>
+    }
+}
+
+#[component]
 pub(crate) fn ArrowLeftIcon() -> impl IntoView {
     view! {
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">

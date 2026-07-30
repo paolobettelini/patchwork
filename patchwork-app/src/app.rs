@@ -1,7 +1,7 @@
 use crate::{
     browse::BrowsePage,
     home::HomePage,
-    icons::{GearIcon, HomeIcon, SearchIcon},
+    icons::{ArrowRightToBracketIcon, GearIcon, HomeIcon, SearchIcon},
     model::{AppTab, LauncherModpack, LauncherSettings},
     settings::SettingsPage,
     tauri_bridge::{list_modpacks, load_launcher_settings},
@@ -102,6 +102,13 @@ fn TopBar(active_tab: ReadSignal<AppTab>, set_active_tab: WriteSignal<AppTab>) -
                     <span>"Settings"</span>
                 </button>
             </nav>
+
+            <div class="topbar-actions">
+                <button type="button" class="sign-in-button">
+                    <span>"Sign in"</span>
+                    <ArrowRightToBracketIcon />
+                </button>
+            </div>
         </header>
     }
 }
