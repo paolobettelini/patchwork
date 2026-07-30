@@ -88,6 +88,7 @@ pub(crate) struct PatchworkConsoleEvent {
     pub(crate) profile_id: String,
     pub(crate) reset: bool,
     pub(crate) line: String,
+    pub(crate) chunk: Option<String>,
     pub(crate) running: bool,
     pub(crate) action: Option<String>,
     pub(crate) runnable: Option<bool>,
@@ -99,6 +100,7 @@ pub(crate) struct PatchworkConsoleEvent {
 pub(crate) struct PatchworkTaskStatus {
     pub(crate) profile_id: String,
     pub(crate) output: String,
+    pub(crate) output_bytes: String,
     pub(crate) running: bool,
     pub(crate) action: Option<String>,
     pub(crate) runnable: bool,

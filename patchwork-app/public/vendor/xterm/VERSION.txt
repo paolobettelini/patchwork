@@ -1,0 +1,4 @@
+@xterm/xterm 5.5.0
+@xterm/addon-fit 0.10.0
+
+Vendored from the npm packages via jsdelivr and loaded as static Tauri assets.

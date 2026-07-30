@@ -155,6 +155,7 @@ pub(crate) async fn toggle_profile_ignore(
 pub(crate) async fn patchwork_task_status(
     profile_id: &str,
     build_mode: &str,
+    include_output: bool,
 ) -> Result<PatchworkTaskStatus, JsValue> {
     #[derive(Serialize)]
     struct Args<'a> {
@@ -162,6 +163,8 @@ pub(crate) async fn patchwork_task_status(
         profile_id: &'a str,
         #[serde(rename = "buildMode")]
         build_mode: &'a str,
+        #[serde(rename = "includeOutput")]
+        include_output: bool,
     }
 
     invoke(
@@ -169,6 +172,7 @@ pub(crate) async fn patchwork_task_status(
         &Args {
             profile_id,
             build_mode,
+            include_output,
         },
     )
     .await

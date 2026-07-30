@@ -1,225 +1,37 @@
 use base64::{Engine, engine::general_purpose};
-use serde::{Deserialize, Serialize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::HashMap,
     fs,
-    hash::{Hash, Hasher},
-    io::{self, BufRead, BufReader},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const SETTINGS_FILE: &str = "settings.json";
-const SETTINGS_POINTER_FILE: &str = "settings-path.json";
-const PATCHWORK_CONSOLE_EVENT: &str = "patchwork-console";
-const DEFAULT_DESCRIPTION: &str = "A new Patchwork modpack.";
-const ICON_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
-const COLOR_PALETTE: [&str; 8] = [
-    "#02a9a9", "#fd614e", "#6268c8", "#fdb22c", "#7df9ff", "#77ff8a", "#ff6bd6", "#ff8a1c",
-];
+mod assets;
+mod model;
+mod paths;
 
-#[derive(Debug)]
-struct AppState {
-    settings_pointer_path: PathBuf,
-    settings_path: Mutex<PathBuf>,
-    settings: Mutex<LauncherSettings>,
-    tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
-}
-
-#[derive(Debug, Default)]
-struct PatchworkTaskState {
-    running: bool,
-    action: Option<String>,
-    child: Option<Child>,
-    stop_requested: bool,
-    output: String,
-    core_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LauncherSettings {
-    #[serde(default = "default_theme")]
-    theme: String,
-    #[serde(default)]
-    cargo_target_dir: String,
-    #[serde(default)]
-    mod_cache: String,
-    #[serde(default)]
-    modpacks_cache: String,
-    #[serde(default, alias = "modpacksDir")]
-    profiles_dir: String,
-    #[serde(default)]
-    build_cache: String,
-    #[serde(default)]
-    settings_file: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LauncherModpack {
-    id: String,
-    name: String,
-    description: String,
-    version: String,
-    mods: usize,
-    dependencies: usize,
-    downloads: String,
-    accent: String,
-    icon_data_url: Option<String>,
-    icon_version: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SelectedIconFile {
-    path: String,
-    data_url: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LauncherDependencyPage {
-    kind: String,
-    id: String,
-    name: String,
-    description: String,
-    editable_profile: bool,
-    distinct_dependency_count: usize,
-    modpacks: Vec<patchwork::DependencyEntry>,
-    mods: Vec<patchwork::DependencyEntry>,
-    diagnostics: Vec<patchwork::DependencyDiagnostic>,
-    icon_data_url: Option<String>,
-    icon_version: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PatchworkConsoleEvent {
-    profile_id: String,
-    reset: bool,
-    line: String,
-    running: bool,
-    action: Option<String>,
-    runnable: Option<bool>,
-    core_error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PatchworkTaskStatus {
-    profile_id: String,
-    output: String,
-    running: bool,
-    action: Option<String>,
-    runnable: bool,
-    core_error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LauncherModpackToml {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    modpacks: Vec<String>,
-    #[serde(default)]
-    mods: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NewModpackToml {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    color: Option<String>,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    modpacks: Vec<String>,
-    #[serde(default)]
-    ignore: Vec<String>,
-    #[serde(default)]
-    mods: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SettingsPointer {
-    settings_file: String,
-}
-
-impl LauncherSettings {
-    fn default_for(patchwork_data: &Path) -> Self {
-        Self {
-            theme: default_theme(),
-            cargo_target_dir: display_path(&patchwork_data.join("target")),
-            mod_cache: display_path(&patchwork_data.join("mods")),
-            modpacks_cache: display_path(&patchwork_data.join("modpacks")),
-            profiles_dir: display_path(&patchwork_data.join("profiles")),
-            build_cache: display_path(&patchwork_data.join("build")),
-            settings_file: display_path(&patchwork_data.join(SETTINGS_FILE)),
-        }
-    }
-
-    fn fill_missing(mut self, defaults: &Self) -> Self {
-        if self.theme.trim().is_empty() {
-            self.theme = defaults.theme.clone();
-        }
-        if self.cargo_target_dir.trim().is_empty() {
-            self.cargo_target_dir = defaults.cargo_target_dir.clone();
-        }
-        if self.mod_cache.trim().is_empty() {
-            self.mod_cache = defaults.mod_cache.clone();
-        }
-        if self.modpacks_cache.trim().is_empty() {
-            self.modpacks_cache = defaults.modpacks_cache.clone();
-        }
-        if self.profiles_dir.trim().is_empty() {
-            self.profiles_dir = defaults.profiles_dir.clone();
-        }
-        if self.build_cache.trim().is_empty() {
-            self.build_cache = defaults.build_cache.clone();
-        }
-        if self.settings_file.trim().is_empty() {
-            self.settings_file = defaults.settings_file.clone();
-        }
-        self
-    }
-
-    fn expand_paths(mut self) -> Self {
-        self.cargo_target_dir = expand_env_vars(&self.cargo_target_dir);
-        self.mod_cache = expand_env_vars(&self.mod_cache);
-        self.modpacks_cache = expand_env_vars(&self.modpacks_cache);
-        self.profiles_dir = expand_env_vars(&self.profiles_dir);
-        self.build_cache = expand_env_vars(&self.build_cache);
-        self.settings_file = expand_env_vars(&self.settings_file);
-        self
-    }
-
-    fn directory_paths(&self) -> [&str; 5] {
-        [
-            &self.cargo_target_dir,
-            &self.mod_cache,
-            &self.modpacks_cache,
-            &self.profiles_dir,
-            &self.build_cache,
-        ]
-    }
-}
-
-fn default_theme() -> String {
-    "dark".to_string()
-}
+use assets::{
+    ICON_EXTENSIONS, copy_icon_to_profile, deterministic_color_for, fake_downloads_for,
+    icon_version_for, matching_icon_for_modpack_file, matching_icon_named, read_icon_data_url,
+    remove_existing_icons,
+};
+use model::{
+    AppState, DEFAULT_DESCRIPTION, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
+    LauncherDependencyPage, LauncherModpack, LauncherModpackToml, LauncherSettings,
+    MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml, PATCHWORK_CONSOLE_EVENT, PatchworkConsoleChunk,
+    PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus, SETTINGS_FILE,
+    SETTINGS_POINTER_FILE, SelectedIconFile, SettingsPointer,
+};
+use paths::{
+    default_patchwork_data_dir, display_path, distinct_dependency_count, expand_env_vars,
+    is_valid_hex_color, non_empty_or, sanitize_build_mode, sanitize_existing_modpack_id,
+    slugify_modpack_id,
+};
 
 #[tauri::command]
 fn select_folder() -> Option<String> {
@@ -668,6 +480,7 @@ fn patchwork_task_status(
     state: State<AppState>,
     profile_id: String,
     build_mode: String,
+    include_output: Option<bool>,
 ) -> Result<PatchworkTaskStatus, String> {
     let settings = state
         .settings
@@ -679,6 +492,7 @@ fn patchwork_task_status(
     let profile_id = sanitize_existing_modpack_id(&profile_id)?;
     let build_mode = sanitize_build_mode(&build_mode)?;
     let runnable = profile_runnable(&settings, &profile_id, &build_mode);
+    let include_output = include_output.unwrap_or(true);
     let tasks = state
         .tasks
         .lock()
@@ -687,10 +501,17 @@ fn patchwork_task_status(
     if let Some(task) = tasks.get(&profile_id) {
         Ok(PatchworkTaskStatus {
             profile_id,
-            output: if task.output.is_empty() {
+            output: if !include_output {
+                String::new()
+            } else if task.output.is_empty() {
                 "Console output will appear here.".to_string()
             } else {
                 task.output.clone()
+            },
+            output_bytes: if include_output {
+                encode_console_bytes(&task.output_bytes)
+            } else {
+                String::new()
             },
             running: task.running,
             action: task.action.clone(),
@@ -700,13 +521,65 @@ fn patchwork_task_status(
     } else {
         Ok(PatchworkTaskStatus {
             profile_id,
-            output: "Console output will appear here.".to_string(),
+            output: if include_output {
+                "Console output will appear here.".to_string()
+            } else {
+                String::new()
+            },
+            output_bytes: String::new(),
             running: false,
             action: None,
             runnable,
             core_error: None,
         })
     }
+}
+
+#[tauri::command]
+fn patchwork_console_chunk(
+    state: State<AppState>,
+    profile_id: String,
+    offset: Option<u64>,
+) -> Result<PatchworkConsoleChunk, String> {
+    let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+    let requested_offset = offset.unwrap_or(0);
+    let tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "patchwork task lock is poisoned".to_string())?;
+
+    let Some(task) = tasks.get(&profile_id) else {
+        return Ok(PatchworkConsoleChunk {
+            profile_id,
+            start_offset: 0,
+            end_offset: 0,
+            bytes: String::new(),
+            reset: requested_offset != 0,
+            running: false,
+            action: None,
+        });
+    };
+
+    let end_offset = task.output_cursor;
+    let available_len = task.output_bytes.len() as u64;
+    let available_start = end_offset.saturating_sub(available_len);
+    let reset = requested_offset < available_start || requested_offset > end_offset;
+    let start_offset = if reset {
+        available_start
+    } else {
+        requested_offset
+    };
+    let slice_start = start_offset.saturating_sub(available_start) as usize;
+
+    Ok(PatchworkConsoleChunk {
+        profile_id,
+        start_offset,
+        end_offset,
+        bytes: encode_console_bytes(&task.output_bytes[slice_start..]),
+        reset,
+        running: task.running,
+        action: task.action.clone(),
+    })
 }
 
 #[tauri::command]
@@ -759,32 +632,50 @@ fn start_patchwork_action(
         task.running = true;
         task.action = Some(action.to_string());
         task.child = None;
+        task.pty_master = None;
+        task.pty_writer = None;
         task.stop_requested = false;
         task.core_error = None;
-        task.output = format!(
-            "Patchwork action: {} ({})\nProfile: {profile_id}\n",
+        task.output.clear();
+        task.output_bytes.clear();
+        task.output_cursor = 0;
+        append_line_to_task(
+            task,
+            &format!(
+                "Patchwork action: {} ({})",
+                compose_action_title(action),
+                build_mode_label(&build_mode)
+            ),
+        );
+        append_line_to_task(task, &format!("Profile: {profile_id}"));
+        let initial_chunk = encode_console_text(&format!(
+            "Patchwork action: {} ({})\r\nProfile: {profile_id}\r\n",
             compose_action_title(action),
             build_mode_label(&build_mode)
+        ));
+
+        drop(tasks);
+
+        emit_console(
+            &app,
+            PatchworkConsoleEvent {
+                profile_id: profile_id.clone(),
+                reset: true,
+                line: format!(
+                    "Patchwork action: {} ({})\nProfile: {profile_id}",
+                    compose_action_title(&action),
+                    build_mode_label(&build_mode)
+                ),
+                chunk: Some(initial_chunk),
+                running: true,
+                action: Some(action.to_string()),
+                runnable: Some(profile_runnable(&settings, &profile_id, &build_mode)),
+                core_error: None,
+            },
         );
     }
 
     let action = action.to_string();
-    emit_console(
-        &app,
-        PatchworkConsoleEvent {
-            profile_id: profile_id.clone(),
-            reset: true,
-            line: format!(
-                "Patchwork action: {} ({})\nProfile: {profile_id}",
-                compose_action_title(&action),
-                build_mode_label(&build_mode)
-            ),
-            running: true,
-            action: Some(action.clone()),
-            runnable: Some(profile_runnable(&settings, &profile_id, &build_mode)),
-            core_error: None,
-        },
-    );
 
     thread::spawn(move || {
         run_patchwork_task(
@@ -802,6 +693,8 @@ fn start_patchwork_action(
             task.running = false;
             task.action = None;
             task.child = None;
+            task.pty_master = None;
+            task.pty_writer = None;
             task.stop_requested = false;
         }
         emit_console(
@@ -810,6 +703,7 @@ fn start_patchwork_action(
                 profile_id: profile_id.clone(),
                 reset: false,
                 line: String::new(),
+                chunk: None,
                 running: false,
                 action: None,
                 runnable: Some(profile_runnable(&settings, &profile_id, &build_mode)),
@@ -843,12 +737,14 @@ fn stop_patchwork_action(
             .map_err(|error| format!("Failed to stop running cargo process: {error}"))?;
         task.stop_requested = true;
         append_line_to_task(task, "[run] Stop requested.");
+        let chunk = encode_console_line("[run] Stop requested.");
         emit_console(
             &app,
             PatchworkConsoleEvent {
                 profile_id,
                 reset: false,
                 line: "[run] Stop requested.".to_string(),
+                chunk: Some(chunk),
                 running: true,
                 action: task.action.clone(),
                 runnable: None,
@@ -861,6 +757,56 @@ fn stop_patchwork_action(
             "There is no running cargo process for '{profile_id}'."
         ))
     }
+}
+
+#[tauri::command]
+fn resize_patchwork_terminal(
+    state: State<AppState>,
+    profile_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<bool, String> {
+    let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+    let size = terminal_size(rows, cols);
+    let mut tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "patchwork task lock is poisoned".to_string())?;
+    let task = tasks.entry(profile_id).or_default();
+    task.terminal_size = Some(size);
+    if let Some(master) = task.pty_master.as_ref() {
+        master
+            .resize(size)
+            .map_err(|error| format!("Failed to resize terminal: {error}"))?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+fn write_patchwork_terminal(
+    state: State<AppState>,
+    profile_id: String,
+    data: String,
+) -> Result<bool, String> {
+    let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+    let bytes = general_purpose::STANDARD
+        .decode(data)
+        .map_err(|error| format!("Invalid terminal input payload: {error}"))?;
+    let mut tasks = state
+        .tasks
+        .lock()
+        .map_err(|_| "patchwork task lock is poisoned".to_string())?;
+    let Some(task) = tasks.get_mut(&profile_id) else {
+        return Ok(false);
+    };
+    let Some(writer) = task.pty_writer.as_mut() else {
+        return Ok(false);
+    };
+    writer
+        .write_all(&bytes)
+        .and_then(|_| writer.flush())
+        .map_err(|error| format!("Failed to write to terminal: {error}"))?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -936,8 +882,11 @@ pub fn run() {
             toggle_profile_ignore,
             is_profile_runnable,
             patchwork_task_status,
+            patchwork_console_chunk,
             start_patchwork_action,
             stop_patchwork_action,
+            resize_patchwork_terminal,
+            write_patchwork_terminal,
             select_modpack_icon,
         ])
         .run(tauri::generate_context!())
@@ -1156,39 +1105,23 @@ fn run_patchwork_task(
             Path::new(&settings.build_cache),
         ) {
             Ok(()) => {
-                emit_console(
+                emit_console_line(
                     &app,
-                    PatchworkConsoleEvent {
-                        profile_id: profile_id.clone(),
-                        reset: false,
-                        line: "[compose] Done.".to_string(),
-                        running: true,
-                        action: Some(action.clone()),
-                        runnable: Some(profile_runnable(&settings, &profile_id, &build_mode)),
-                        core_error: None,
-                    },
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    "[compose] Done.",
                 );
-                append_task_line(&tasks, &profile_id, "[compose] Done.", None);
             }
             Err(error) => {
                 let error = error.to_string();
-                append_task_line(
+                emit_console_line_with_error(
+                    &app,
                     &tasks,
                     &profile_id,
+                    &action,
                     &format!("[compose] Failed: {error}"),
-                    Some(error.clone()),
-                );
-                emit_console(
-                    &app,
-                    PatchworkConsoleEvent {
-                        profile_id: profile_id.clone(),
-                        reset: false,
-                        line: format!("[compose] Failed: {error}"),
-                        running: true,
-                        action: Some(action),
-                        runnable: Some(profile_runnable(&settings, &profile_id, &build_mode)),
-                        core_error: Some(error),
-                    },
+                    Some(error),
                 );
                 return;
             }
@@ -1246,15 +1179,15 @@ fn run_cargo_process(
         return;
     }
 
-    let mut command = Command::new("cargo");
-    command
-        .arg(cargo_action)
-        .current_dir(project_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut command = CommandBuilder::new("cargo");
+    command.arg(cargo_action);
+    command.cwd(project_dir.as_os_str());
     if build_mode == "release" {
         command.arg("--release");
     }
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("CARGO_TERM_COLOR", "always");
     if !cargo_target_dir.trim().is_empty() {
         command.env("CARGO_TARGET_DIR", cargo_target_dir);
     }
@@ -1283,7 +1216,56 @@ fn run_cargo_process(
         );
     }
 
-    let mut child = match command.spawn() {
+    let initial_size = tasks
+        .lock()
+        .ok()
+        .and_then(|tasks| tasks.get(profile_id).and_then(|task| task.terminal_size))
+        .unwrap_or_else(default_terminal_size);
+
+    let pty_system = native_pty_system();
+    let pair = match pty_system.openpty(initial_size) {
+        Ok(pair) => pair,
+        Err(error) => {
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[{cargo_action}] Failed to open PTY: {error}"),
+            );
+            return;
+        }
+    };
+
+    let reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[{cargo_action}] Failed to open PTY reader: {error}"),
+            );
+            return;
+        }
+    };
+
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[{cargo_action}] Failed to open PTY writer: {error}"),
+            );
+            return;
+        }
+    };
+
+    let child = match pair.slave.spawn_command(command) {
         Ok(child) => child,
         Err(error) => {
             emit_console_line(
@@ -1296,28 +1278,22 @@ fn run_cargo_process(
             return;
         }
     };
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    drop(pair.slave);
 
     if let Ok(mut tasks) = tasks.lock() {
-        tasks.entry(profile_id.to_string()).or_default().child = Some(child);
+        let task = tasks.entry(profile_id.to_string()).or_default();
+        task.child = Some(child);
+        task.pty_master = Some(pair.master);
+        task.pty_writer = Some(writer);
     }
 
-    let stdout_reader = stdout.map(|stdout| {
+    let reader = {
         let app = app.clone();
         let tasks = tasks.clone();
         let profile_id = profile_id.to_string();
         let action = action.to_string();
-        thread::spawn(move || stream_process_output(app, tasks, profile_id, action, stdout))
-    });
-    let stderr_reader = stderr.map(|stderr| {
-        let app = app.clone();
-        let tasks = tasks.clone();
-        let profile_id = profile_id.to_string();
-        let action = action.to_string();
-        thread::spawn(move || stream_process_output(app, tasks, profile_id, action, stderr))
-    });
+        thread::spawn(move || stream_pty_output(app, tasks, profile_id, action, reader))
+    };
 
     loop {
         let status = {
@@ -1340,6 +1316,8 @@ fn run_cargo_process(
                     Ok(Some(status)) => {
                         let stopped = task.stop_requested;
                         task.child = None;
+                        task.pty_master = None;
+                        task.pty_writer = None;
                         Some((status, stopped))
                     }
                     Ok(None) => None,
@@ -1347,12 +1325,14 @@ fn run_cargo_process(
                         let line =
                             format!("[{cargo_action}] Failed while waiting for cargo: {error}");
                         append_line_to_task(task, &line);
+                        let chunk = encode_console_line(&line);
                         emit_console(
                             app,
                             PatchworkConsoleEvent {
                                 profile_id: profile_id.to_string(),
                                 reset: false,
                                 line,
+                                chunk: Some(chunk),
                                 running: true,
                                 action: Some(action.to_string()),
                                 runnable: None,
@@ -1360,17 +1340,22 @@ fn run_cargo_process(
                             },
                         );
                         task.child = None;
+                        task.pty_master = None;
+                        task.pty_writer = None;
                         break;
                     }
                 },
                 None => {
-                    append_line_to_task(task, &format!("[{cargo_action}] Stopped."));
+                    let line = format!("[{cargo_action}] Stopped.");
+                    append_line_to_task(task, &line);
+                    let chunk = encode_console_line(&line);
                     emit_console(
                         app,
                         PatchworkConsoleEvent {
                             profile_id: profile_id.to_string(),
                             reset: false,
-                            line: format!("[{cargo_action}] Stopped."),
+                            line,
+                            chunk: Some(chunk),
                             running: false,
                             action: None,
                             runnable: None,
@@ -1428,25 +1413,32 @@ fn run_cargo_process(
         thread::sleep(Duration::from_millis(120));
     }
 
-    if let Some(reader) = stdout_reader {
-        let _ = reader.join();
-    }
-    if let Some(reader) = stderr_reader {
-        let _ = reader.join();
-    }
+    let _ = reader.join();
 }
 
-fn stream_process_output<R>(
+fn stream_pty_output<R>(
     app: AppHandle,
     tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
     profile_id: String,
     action: String,
-    output: R,
+    mut output: R,
 ) where
-    R: io::Read,
+    R: Read,
 {
-    for line in BufReader::new(output).lines().map_while(Result::ok) {
-        emit_console_line(&app, &tasks, &profile_id, &action, &line);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match output.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(len) => emit_console_bytes(
+                &app,
+                &tasks,
+                &profile_id,
+                &action,
+                &buffer[..len],
+            ),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
     }
 }
 
@@ -1457,13 +1449,48 @@ fn emit_console_line(
     action: &str,
     line: &str,
 ) {
-    append_task_line(tasks, profile_id, line, None);
+    emit_console_line_with_error(app, tasks, profile_id, action, line, None);
+}
+
+fn emit_console_line_with_error(
+    app: &AppHandle,
+    tasks: &Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
+    profile_id: &str,
+    action: &str,
+    line: &str,
+    core_error: Option<String>,
+) {
+    append_task_line(tasks, profile_id, line, core_error.clone());
     emit_console(
         app,
         PatchworkConsoleEvent {
             profile_id: profile_id.to_string(),
             reset: false,
             line: line.to_string(),
+            chunk: Some(encode_console_line(line)),
+            running: true,
+            action: Some(action.to_string()),
+            runnable: None,
+            core_error,
+        },
+    );
+}
+
+fn emit_console_bytes(
+    app: &AppHandle,
+    tasks: &Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
+    profile_id: &str,
+    action: &str,
+    bytes: &[u8],
+) {
+    append_task_bytes(tasks, profile_id, bytes);
+    emit_console(
+        app,
+        PatchworkConsoleEvent {
+            profile_id: profile_id.to_string(),
+            reset: false,
+            line: String::new(),
+            chunk: Some(encode_console_bytes(bytes)),
             running: true,
             action: Some(action.to_string()),
             runnable: None,
@@ -1491,12 +1518,76 @@ fn append_task_line(
     }
 }
 
+fn append_task_bytes(
+    tasks: &Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
+    profile_id: &str,
+    bytes: &[u8],
+) {
+    if let Ok(mut tasks) = tasks.lock() {
+        let task = tasks.entry(profile_id.to_string()).or_default();
+        append_bytes_to_task(task, bytes);
+    }
+}
+
 fn append_line_to_task(task: &mut PatchworkTaskState, line: &str) {
     if !task.output.is_empty() && !task.output.ends_with('\n') {
         task.output.push('\n');
     }
     task.output.push_str(line);
     task.output.push('\n');
+    append_output_bytes_to_task(task, encode_console_terminal_line(line).as_bytes());
+    trim_console_snapshot(task);
+}
+
+fn append_bytes_to_task(task: &mut PatchworkTaskState, bytes: &[u8]) {
+    append_output_bytes_to_task(task, bytes);
+    task.output.push_str(&String::from_utf8_lossy(bytes));
+    trim_console_snapshot(task);
+}
+
+fn append_output_bytes_to_task(task: &mut PatchworkTaskState, bytes: &[u8]) {
+    task.output_cursor = task.output_cursor.saturating_add(bytes.len() as u64);
+    task.output_bytes.extend_from_slice(bytes);
+}
+
+fn trim_console_snapshot(task: &mut PatchworkTaskState) {
+    if task.output_bytes.len() > MAX_CONSOLE_SNAPSHOT_BYTES {
+        let excess = task.output_bytes.len() - MAX_CONSOLE_SNAPSHOT_BYTES;
+        task.output_bytes.drain(..excess);
+    }
+    if task.output.len() > MAX_CONSOLE_SNAPSHOT_BYTES {
+        let excess = task.output.len() - MAX_CONSOLE_SNAPSHOT_BYTES;
+        task.output.drain(..excess);
+    }
+}
+
+fn encode_console_line(line: &str) -> String {
+    encode_console_text(&encode_console_terminal_line(line))
+}
+
+fn encode_console_terminal_line(line: &str) -> String {
+    format!("{line}\r\n")
+}
+
+fn encode_console_text(text: &str) -> String {
+    encode_console_bytes(text.as_bytes())
+}
+
+fn encode_console_bytes(bytes: &[u8]) -> String {
+    general_purpose::STANDARD.encode(bytes)
+}
+
+fn default_terminal_size() -> PtySize {
+    terminal_size(DEFAULT_TERMINAL_ROWS, DEFAULT_TERMINAL_COLS)
+}
+
+fn terminal_size(rows: u16, cols: u16) -> PtySize {
+    PtySize {
+        rows: rows.clamp(1, 2000),
+        cols: cols.clamp(2, 1000),
+        pixel_width: 0,
+        pixel_height: 0,
+    }
 }
 
 fn profile_runnable(settings: &LauncherSettings, profile_id: &str, build_mode: &str) -> bool {
@@ -1548,264 +1639,4 @@ fn build_mode_label(mode: &str) -> &'static str {
         "debug" => "Debug mode",
         _ => "Release mode",
     }
-}
-
-fn read_icon_data_url(path: &Path) -> Result<String, io::Error> {
-    let bytes = fs::read(path)?;
-    let mime = mime_for_icon_path(path);
-    Ok(format!(
-        "data:{mime};base64,{}",
-        general_purpose::STANDARD.encode(bytes)
-    ))
-}
-
-fn matching_icon_for_modpack_file(path: &Path) -> Result<Option<PathBuf>, String> {
-    let Some(parent) = path.parent() else {
-        return Ok(None);
-    };
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
-        return Ok(None);
-    };
-
-    matching_icon_named(parent, stem)
-}
-
-fn matching_icon_named(parent: &Path, stem: &str) -> Result<Option<PathBuf>, String> {
-    let mut matches = fs::read_dir(parent)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|candidate| candidate.is_file())
-        .filter(|candidate| {
-            candidate
-                .file_stem()
-                .and_then(|file_stem| file_stem.to_str())
-                == Some(stem)
-                && supported_icon_extension(candidate).is_some()
-        })
-        .collect::<Vec<_>>();
-
-    if matches.len() > 1 {
-        matches.sort();
-        let names = matches
-            .iter()
-            .filter_map(|path| path.file_name().and_then(|name| name.to_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(format!(
-            "Multiple favicon files found for '{stem}': {names}. Keep exactly one."
-        ));
-    }
-
-    Ok(matches.pop())
-}
-
-fn copy_icon_to_profile(source: &Path, profiles_dir: &Path, id: &str) -> Result<(), String> {
-    let extension = supported_icon_extension(source)
-        .ok_or_else(|| "Selected favicon must be png, jpg, jpeg, webp, or gif".to_string())?;
-    remove_existing_icons(profiles_dir, id).map_err(|error| error.to_string())?;
-    let destination = profiles_dir.join(format!("{id}.{extension}"));
-    fs::copy(source, &destination).map_err(|error| {
-        format!(
-            "Failed to copy favicon '{}' to '{}': {error}",
-            source.display(),
-            destination.display()
-        )
-    })?;
-    Ok(())
-}
-
-fn remove_existing_icons(profiles_dir: &Path, id: &str) -> Result<(), io::Error> {
-    for extension in ICON_EXTENSIONS {
-        let path = profiles_dir.join(format!("{id}.{extension}"));
-        if path.is_file() {
-            fs::remove_file(path)?;
-        }
-    }
-    Ok(())
-}
-
-fn supported_icon_extension(path: &Path) -> Option<String> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    ICON_EXTENSIONS
-        .contains(&extension.as_str())
-        .then_some(extension)
-}
-
-fn mime_for_icon_path(path: &Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("webp") => "image/webp",
-        Some("gif") => "image/gif",
-        _ => "image/png",
-    }
-}
-
-fn icon_version_for(path: &Path) -> Result<String, io::Error> {
-    let metadata = fs::metadata(path)?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    Ok(format!("{}:{modified}", metadata.len()))
-}
-
-fn default_patchwork_data_dir(tauri_data_dir: &Path) -> PathBuf {
-    tauri_data_dir
-        .parent()
-        .map(|parent| parent.join("patchwork"))
-        .unwrap_or_else(|| tauri_data_dir.join("patchwork"))
-}
-
-fn deterministic_color_for(id: &str) -> &'static str {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    let index = hasher.finish() as usize % COLOR_PALETTE.len();
-    COLOR_PALETTE[index]
-}
-
-fn fake_downloads_for(id: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    let value = 1.0 + (hasher.finish() % 24_900) as f32 / 1_000.0;
-    format!("{value:.1}K")
-}
-
-fn distinct_dependency_count(modpacks: &[String], mods: &[String]) -> usize {
-    let mut dependencies = modpacks
-        .iter()
-        .chain(mods.iter())
-        .map(|dependency| dependency.trim())
-        .filter(|dependency| !dependency.is_empty())
-        .collect::<Vec<_>>();
-    dependencies.sort_unstable();
-    dependencies.dedup();
-    dependencies.len()
-}
-
-fn non_empty_or(value: &str, fallback: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        fallback.to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn is_valid_hex_color(color: &str) -> bool {
-    color.len() == 7
-        && color.starts_with('#')
-        && color
-            .chars()
-            .skip(1)
-            .all(|character| character.is_ascii_hexdigit())
-}
-
-fn slugify_modpack_id(name: &str) -> String {
-    let mut id = String::new();
-    let mut previous_dash = false;
-
-    for character in name.trim().chars() {
-        if character.is_ascii_alphanumeric() {
-            id.push(character.to_ascii_lowercase());
-            previous_dash = false;
-        } else if matches!(character, '-' | '_' | ' ' | '.') && !previous_dash && !id.is_empty() {
-            id.push('-');
-            previous_dash = true;
-        }
-    }
-
-    while id.ends_with('-') {
-        id.pop();
-    }
-    id
-}
-
-fn sanitize_existing_modpack_id(id: &str) -> Result<String, String> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return Err("Modpack id cannot be empty".to_string());
-    }
-    if trimmed
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        Ok(trimmed.to_string())
-    } else {
-        Err(format!("Invalid modpack id '{trimmed}'"))
-    }
-}
-
-fn sanitize_build_mode(mode: &str) -> Result<String, String> {
-    let mode = mode.trim();
-    if matches!(mode, "release" | "debug") {
-        Ok(mode.to_string())
-    } else {
-        Err(format!("Unknown build mode '{mode}'"))
-    }
-}
-
-fn expand_env_vars(value: &str) -> String {
-    let mut expanded = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-
-    while let Some(character) = chars.next() {
-        if character != '$' {
-            expanded.push(character);
-            continue;
-        }
-
-        if chars.peek() == Some(&'{') {
-            chars.next();
-            let mut name = String::new();
-            for next in chars.by_ref() {
-                if next == '}' {
-                    break;
-                }
-                name.push(next);
-            }
-            if name.is_empty() {
-                expanded.push_str("${}");
-            } else if let Ok(value) = std::env::var(&name) {
-                expanded.push_str(&value);
-            } else {
-                expanded.push_str("${");
-                expanded.push_str(&name);
-                expanded.push('}');
-            }
-            continue;
-        }
-
-        let mut name = String::new();
-        while let Some(next) = chars.peek().copied() {
-            if next.is_ascii_alphanumeric() || next == '_' {
-                name.push(next);
-                chars.next();
-            } else {
-                break;
-            }
-        }
-
-        if name.is_empty() {
-            expanded.push('$');
-        } else if let Ok(value) = std::env::var(&name) {
-            expanded.push_str(&value);
-        } else {
-            expanded.push('$');
-            expanded.push_str(&name);
-        }
-    }
-
-    expanded
-}
-
-fn display_path(path: &Path) -> String {
-    path.display().to_string()
 }

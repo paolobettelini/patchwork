@@ -6,6 +6,7 @@ use crate::{
         load_dependency_page, patchwork_task_status, select_icon_file, select_modpack_icon,
         start_patchwork_action, stop_patchwork_action, update_profile_metadata,
     },
+    terminal::ConsoleTerminal,
 };
 use leptos::prelude::*;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
@@ -42,7 +43,7 @@ pub(crate) fn HomePage(
     let (running_action, set_running_action) = signal(None::<String>);
     let (is_runnable, set_is_runnable) = signal(false);
     let (patchwork_action_error, set_patchwork_action_error) = signal(None::<String>);
-    let (console_output, set_console_output) =
+    let (_console_output, set_console_output) =
         signal("Console output will appear here.".to_string());
     let (navigation_history, set_navigation_history) = signal(Vec::<(String, String)>::new());
     let (editing_profile_title, set_editing_profile_title) = signal(false);
@@ -570,7 +571,9 @@ pub(crate) fn HomePage(
 
                         <Show
                             when=move || active_detail_tab.get() == "dependencies"
-                            fallback=move || view! { <pre class="console-output">{move || console_output.get()}</pre> }
+                            fallback=move || view! {
+                                <ConsoleTerminal dependency_page build_mode />
+                            }
                         >
                             <DependencyPanel
                                 page=dependency_page
@@ -1001,7 +1004,7 @@ fn refresh_profile_status(
     set_patchwork_action_error: WriteSignal<Option<String>>,
 ) {
     leptos::task::spawn_local(async move {
-        if let Ok(status) = patchwork_task_status(&profile_id, build_mode).await {
+        if let Ok(status) = patchwork_task_status(&profile_id, build_mode, false).await {
             apply_task_status(
                 status,
                 set_console_output,
@@ -1022,7 +1025,9 @@ fn apply_task_status(
     set_is_runnable: WriteSignal<bool>,
     set_patchwork_action_error: WriteSignal<Option<String>>,
 ) {
-    set_console_output.set(status.output);
+    if !status.output.is_empty() {
+        set_console_output.set(status.output);
+    }
     set_task_running.set(status.running);
     set_running_action.set(if status.running { status.action } else { None });
     set_is_runnable.set(status.runnable);

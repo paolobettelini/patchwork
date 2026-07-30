@@ -8,6 +8,7 @@ mod icons;
 mod model;
 mod settings;
 mod tauri_bridge;
+mod terminal;
 
 #[wasm_bindgen(start)]
 pub fn start() {

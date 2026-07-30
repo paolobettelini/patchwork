@@ -18,6 +18,7 @@
   --app-bg: #171a23;
   --panel-bg: rgba(36, 40, 51, 0.96);
   --topbar-bg: rgba(29, 33, 44, 0.96);
+  --console-bg: #101219;
   --accent-gradient: linear-gradient(90deg, var(--teal), var(--gold), var(--coral), var(--indigo));
   --action-ink: #151821;
   --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
@@ -36,6 +37,7 @@
   --app-bg: #171a23;
   --panel-bg: rgba(36, 40, 51, 0.96);
   --topbar-bg: rgba(29, 33, 44, 0.96);
+  --console-bg: #101219;
   --accent-gradient: linear-gradient(90deg, var(--teal), var(--gold), var(--coral), var(--indigo));
   --action-ink: #151821;
   --shadow: 0 18px 44px rgba(0, 0, 0, 0.24);
@@ -1178,6 +1180,36 @@ h2 {
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.console-terminal {
+  width: 100%;
+  height: clamp(280px, 44vh, 560px);
+  min-height: 280px;
+  overflow: hidden;
+  padding: 8px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--console-bg);
+}
+
+.console-terminal .xterm {
+  height: 100%;
+  padding: 4px;
+}
+
+.console-terminal .xterm-screen,
+.console-terminal .xterm-viewport {
+  background: transparent !important;
+}
+
+.console-terminal .xterm-viewport {
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.console-terminal .xterm-cursor-layer,
+.console-terminal .xterm-cursor {
+  display: none !important;
 }
 
 .dependency-error,
