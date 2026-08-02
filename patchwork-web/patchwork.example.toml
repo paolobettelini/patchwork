@@ -1,0 +1,15 @@
+[server]
+address = "0.0.0.0"
+port = 8080
+db-connection = "./patchwork.sqlite"
+frontend-url = "http://localhost:8080"
+
+[email]
+RESEND_API_KEY = "replace-with-resend-api-key"
+
+[github]
+app_id = 123456
+client_id = "replace-with-github-client-id"
+client_secret = "replace-with-github-client-secret"
+private_key_path = "./github-app.pem"
+callback_url = "http://localhost:8080/github/callback"

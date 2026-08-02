@@ -1,161 +1,46 @@
 # Patchwork
 
-Patchwork is an experimental source-level modding system for Rust software.
-Instead of loading binary plugins at runtime, Patchwork composes a list of mods into a
-normal Cargo project and then compiles the game.
+Patchwork is an experimental source-level modding platform for Rust software.
+Instead of loading binary plugins at runtime, it composes the selected mods into
+a normal Cargo project and then compiles the complete application.
 
 <div align="center">
-  <img src="./media/app_preview.png" alt="App Preview" width="600">
+  <img src="./media/app_preview.png" alt="Patchwork desktop app" width="600">
 </div>
 
-The core idea is:
+The core idea is that every mechanic or object can be a distinct Rust crate.
+Mods depend on other mods or abstract APIs, modpacks choose the concrete
+implementations, and Rust type-checks the final generated program.
 
-> Instead of having a "base game" and adding mods on top, the entire game is entirely composed by mods, stringed together at compiled time in a single project. Every single mechanic or object in the game is a distinct mod. Mods depend on eachother and can be swapped with other implementations. This architecture results in a game that is fully customizable and moddable in every aspect, and the player has complete choice over its contents.
-
-Checkout the documentation (Coming Soon).
-
-## Project layout
+## Components
 
 ```text
 modding_system/
-  patchwork/       core composition library
-  patchwork-cli/   CLI exposing `patchwork compose`
-  patchwork-app/   Tauri + Leptos desktop launcher
-  template/        base executable project copied into composed projects
-  documentation/   mdBook documentation
+  patchwork/            core composition library
+  patchwork-cli/        `patchwork compose` command
+  patchwork-app/        Leptos + Tauri desktop launcher
+  patchwork-ui/         shared Leptos components
+  patchwork-registry-types/ shared registry API DTOs
+  patchwork-web/        Leptos website + Actix backend
+  patchwork-database/   Diesel models and migrations
+  template/             base generated Cargo project
+  documentation/        mdBook documentation
 ```
 
-A game or application using Patchwork usually has:
+## Documentation
 
-```text
-my_game/
-  mods/
-  modpacks/
-  build/
+The [mdBook summary](documentation/src/SUMMARY.md) links the complete
+documentation for the composition model, metadata, desktop launcher, web
+configuration, accounts, OAuth, GitHub integration, database, and backend API.
+
+Build or serve it locally with:
+
+```bash
+mdbook build documentation
+mdbook serve documentation
 ```
 
-## Mod metadata
-
-Each selectable mod is a Cargo crate with metadata in its `Cargo.toml`:
-
-```toml
-[package.metadata.mod]
-entry = "EntryType"
-provides = "optional-api-name"
-support = false
-
-[package.metadata.mod.dependencies]
-init = []
-run = []
-ownership = []
-```
-
-- `entry`: Rust type used by the generated glue code. Required unless
-  `support = true`.
-- `provides`: optional API name implemented by this mod.
-- `support`: set to `true` for a selected support mod with no lifecycle object.
-  Support mods are included as Cargo dependencies and can contribute assets or
-  codegen, but Patchwork does not call `init()` or `run()` for them.
-- `init`: dependencies passed to `EntryType::init()` as `&mut T`.
-- `run`: dependencies passed to `EntryType::run()` as `Arc<T>`.
-- `ownership`: dependencies moved into `run()` by value.
-
-Patchwork does not require a shared Rust trait for mods yet. The generated
-project calls `EntryType::init(...)` and `EntryType::run(...)` directly; Rust
-then type-checks the composed program.
-
-## APIs and providers
-
-API crates contain traits and shared types. If an API crate should appear as a
-selectable/clickable Patchwork mod, declare it as a support mod:
-
-```toml
-[package.metadata.mod]
-support = true
-```
-
-Support mods do not declare `entry` or `provides`. A concrete lifecycle mod
-provides the API:
-
-```toml
-[package.metadata.mod]
-entry = "StdCommandProcessorMod"
-provides = "command-api"
-```
-
-Other mods can depend on `"command-api"` in `init`, `run` or `ownership`.
-The selected modpack must contain exactly one provider for each required API.
-This gives compile-time dependency injection: the modpack chooses the concrete
-implementation and Rust checks the result.
-
-## Modpacks
-
-A modpack is a TOML file selecting mods and importing other modpacks:
-
-```toml
-name = "Client"
-description = "Client-side modpack."
-color = "#02a9a9"
-modpacks = ["common"]
-ignore = []
-
-mods = [
-    "main-client-mod",
-    "network-client-impl",
-]
-```
-
-Fields:
-
-- `name`, `description`: launcher/browser metadata.
-- `color`: optional selected color in the launcher.
-- `modpacks`: imported modpacks.
-- `mods`: explicitly selected mods.
-- `ignore`: mods removed from the imported dependency tree.
-
-Patchwork also supports the legacy reference form `modpack/common` inside
-`mods`, `init`, `run` and `ownership`, but the top-level `modpacks = [...]`
-field is preferred for modpack imports.
-
-## Codegen
-
-Mods can declare generated crates:
-
-```toml
-[[package.metadata.mod.codegen]]
-crate = "items-generated"
-version = "0.1.0"
-dev_crate = "items-generated"
-
-[package.metadata.mod.codegen.generator]
-crate = "items-codegen-utils"
-command = "generate"
-```
-
-Patchwork only launches the generator and patches the generated crate into the
-composed Cargo project. The meaning of the generated code is owned by the
-domain mod. For example, a network generator may aggregate all message types
-exported by independent message mods.
-
-## Assets and favicons
-
-If a selected mod contains an `assets/` directory, Patchwork copies it into the
-composed project as:
-
-```text
-assets/<mod-name>/
-```
-
-This keeps asset paths isolated between mods.
-
-The launcher also uses filesystem favicon conventions:
-
-- `mods/<mod>/favicon.png` (or `.jpg`, `.jpeg`, `.webp`, `.gif`) for a mod;
-- `modpacks/<id>.png` (or supported image extension) for `<id>.toml`.
-
-Favicons are visual metadata only; they do not affect composition.
-
-## CLI
+## Compose from the CLI
 
 ```bash
 patchwork compose \
@@ -166,8 +51,68 @@ patchwork compose \
   --name client
 ```
 
-The output is a normal Cargo project:
+The output is a regular Cargo project:
 
 ```bash
 cargo check --manifest-path build/client/Cargo.toml
 ```
+
+## Start the desktop app
+
+```bash
+cd patchwork-app
+cargo tauri dev
+```
+
+## Start the website
+
+Create a private server configuration, fill in the Resend and GitHub App
+credentials, then build the Leptos assets and run Actix:
+
+```bash
+cd patchwork-web
+cp patchwork.example.toml patchwork.toml
+cargo leptos build
+cargo run --features server -- --config patchwork.toml
+```
+
+The default bind address is `0.0.0.0:8080`. Server, email, database, and GitHub
+backend configuration are read from the TOML file. Embedded migrations run
+automatically when the server connects.
+
+During early development the database uses a single baseline migration. Delete
+the local SQLite file and sign in again after schema changes; the mdBook's
+[database chapter](documentation/src/database.md) documents this policy.
+
+Authenticated users with a linked GitHub account can scan and publish mods from
+Upload on either client. Patchwork pins the default branch to an exact commit,
+walks GitHub trees without cloning, previews immutable versions, and publishes
+only selected server-side scan entries. The complete contract is in
+[Registry publication](documentation/src/registry_publication.md).
+
+## Mod metadata
+
+A lifecycle mod declares an entry type and its dependencies:
+
+```toml
+[package.metadata.mod]
+entry = "EntryType"
+provides = "optional-api-name"
+
+[package.metadata.mod.dependencies]
+init = []
+run = []
+ownership = []
+```
+
+An API, asset-only crate, or other selected mod with no lifecycle object uses:
+
+```toml
+[package.metadata.mod]
+support = true
+```
+
+Support mods are real selected mods and Cargo dependencies, but Patchwork does
+not generate `init()` or `run()` calls for them. See the
+[metadata reference](documentation/src/metadata_reference.md) for the complete
+format, providers, modpacks, codegen, assets, and favicons.

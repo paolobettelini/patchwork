@@ -1,0 +1,15 @@
+[package]
+name = "patchwork-ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+leptos = { version = "0.8.17", default-features = false }
+patchwork-registry-types = { path = "../patchwork-registry-types" }
+
+[features]
+default = []
+csr = ["leptos/csr"]
+hydrate = ["leptos/hydrate"]
+ssr = ["leptos/ssr"]

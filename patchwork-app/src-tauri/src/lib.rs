@@ -12,8 +12,10 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod assets;
+mod auth;
 mod model;
 mod paths;
+mod registry;
 
 use assets::{
     ICON_EXTENSIONS, copy_icon_to_profile, deterministic_color_for, fake_downloads_for,
@@ -21,11 +23,11 @@ use assets::{
     remove_existing_icons,
 };
 use model::{
-    AppState, DEFAULT_DESCRIPTION, DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS,
-    LauncherDependencyPage, LauncherModpack, LauncherModpackToml, LauncherSettings,
-    MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml, PATCHWORK_CONSOLE_EVENT, PatchworkConsoleChunk,
-    PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus, SETTINGS_FILE,
-    SETTINGS_POINTER_FILE, SelectedIconFile, SettingsPointer,
+    AUTH_FILE, AppState, CONFIG_DIR, DEFAULT_DESCRIPTION, DEFAULT_TERMINAL_COLS,
+    DEFAULT_TERMINAL_ROWS, LauncherDependencyPage, LauncherModpack, LauncherModpackToml,
+    LauncherSettings, MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml, PATCHWORK_CONSOLE_EVENT,
+    PatchworkConsoleChunk, PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus,
+    SETTINGS_FILE, SETTINGS_POINTER_FILE, SelectedIconFile, SettingsPointer,
 };
 use paths::{
     default_patchwork_data_dir, display_path, distinct_dependency_count, expand_env_vars,
@@ -847,10 +849,12 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let tauri_data_dir = app.path().app_data_dir()?;
-            fs::create_dir_all(&tauri_data_dir)?;
             let patchwork_data_dir = default_patchwork_data_dir(&tauri_data_dir);
-            let default_settings_path = patchwork_data_dir.join(SETTINGS_FILE);
-            let settings_pointer_path = tauri_data_dir.join(SETTINGS_POINTER_FILE);
+            fs::create_dir_all(&patchwork_data_dir)?;
+            let patchwork_config_dir = patchwork_data_dir.join(CONFIG_DIR);
+            fs::create_dir_all(&patchwork_config_dir)?;
+            let default_settings_path = patchwork_config_dir.join(SETTINGS_FILE);
+            let settings_pointer_path = patchwork_config_dir.join(SETTINGS_POINTER_FILE);
             let settings_path =
                 load_settings_pointer(&settings_pointer_path).unwrap_or(default_settings_path);
             let defaults = LauncherSettings::default_for(&patchwork_data_dir);
@@ -858,10 +862,15 @@ pub fn run() {
             ensure_settings_dirs(&settings)?;
             save_settings(&settings_path, &settings)?;
             save_settings_pointer(&settings_pointer_path, &settings_path)?;
+            let auth_path = patchwork_config_dir.join(AUTH_FILE);
+            let auth = auth::load_auth_state(&auth_path)?;
+            auth::save_auth_state(&auth_path, &auth)?;
             app.manage(AppState {
                 settings_pointer_path,
                 settings_path: Mutex::new(settings_path),
                 settings: Mutex::new(settings),
+                auth_path,
+                auth: Mutex::new(auth),
                 tasks: Arc::new(Mutex::new(HashMap::new())),
             });
             Ok(())
@@ -870,6 +879,20 @@ pub fn run() {
             select_folder,
             select_settings_file,
             select_icon_file,
+            auth::auth_status,
+            auth::start_oauth_login,
+            auth::refresh_auth_profile,
+            auth::start_github_connect,
+            auth::disconnect_github,
+            auth::logout_auth,
+            auth::update_auth_nickname,
+            registry::registry_create_scan,
+            registry::registry_start_scan,
+            registry::registry_scan_progress,
+            registry::registry_get_scan,
+            registry::registry_publish_scan,
+            registry::registry_rescan_mod,
+            registry::registry_start_rescan,
             load_launcher_settings,
             update_launcher_path,
             update_launcher_theme,
@@ -1105,13 +1128,7 @@ fn run_patchwork_task(
             Path::new(&settings.build_cache),
         ) {
             Ok(()) => {
-                emit_console_line(
-                    &app,
-                    &tasks,
-                    &profile_id,
-                    &action,
-                    "[compose] Done.",
-                );
+                emit_console_line(&app, &tasks, &profile_id, &action, "[compose] Done.");
             }
             Err(error) => {
                 let error = error.to_string();
@@ -1429,13 +1446,7 @@ fn stream_pty_output<R>(
     loop {
         match output.read(&mut buffer) {
             Ok(0) => break,
-            Ok(len) => emit_console_bytes(
-                &app,
-                &tasks,
-                &profile_id,
-                &action,
-                &buffer[..len],
-            ),
+            Ok(len) => emit_console_bytes(&app, &tasks, &profile_id, &action, &buffer[..len]),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }

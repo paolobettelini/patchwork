@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS github_oauth_states;
+DROP TABLE IF EXISTS github_accounts;
+DROP TABLE IF EXISTS app_tokens;
+DROP TABLE IF EXISTS oauth_authorization_codes;
+DROP TABLE IF EXISTS web_sessions;
+DROP TABLE IF EXISTS registry_scan_entries;
+DROP TABLE IF EXISTS registry_scans;
+DROP TABLE IF EXISTS mod_version_dependencies;
+DROP TABLE IF EXISTS mod_versions;
+DROP TABLE IF EXISTS modpack_dependencies;
+DROP TABLE IF EXISTS modpacks;
+DROP TABLE IF EXISTS mods;
+DROP TABLE IF EXISTS repositories;
+DROP TABLE IF EXISTS pending_registrations;
+DROP TABLE IF EXISTS accounts;

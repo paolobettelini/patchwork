@@ -1,12 +1,26 @@
 use crate::{
-    browse::BrowsePage,
     home::HomePage,
     icons::{ArrowRightToBracketIcon, GearIcon, HomeIcon, SearchIcon},
-    model::{AppTab, LauncherModpack, LauncherSettings},
+    model::{AppTab, LauncherAuthStatus, LauncherModpack, LauncherSettings},
     settings::SettingsPage,
-    tauri_bridge::{list_modpacks, load_launcher_settings},
+    tauri_bridge::{
+        auth_status, disconnect_github, list_modpacks, listen_patchwork_auth,
+        load_launcher_settings, logout_auth, refresh_auth_profile, registry_get_scan,
+        registry_publish_scan, registry_scan_progress, registry_start_rescan, registry_start_scan,
+        start_github_connect, start_oauth_login, update_auth_nickname,
+    },
 };
 use leptos::prelude::*;
+use patchwork_registry_types::{
+    RegistryPublishRequest, RegistryScan, RegistryScanPhase, RegistryScanProgress,
+    RegistryScanRequest,
+};
+use patchwork_ui::{
+    BrowsePage, GithubIcon, ProfilePage, PublishedProject as UiPublishedProject, UploadIcon,
+    UploadPage, UserIcon,
+};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
+use wasm_bindgen_futures::JsFuture;
 
 #[component]
 pub(crate) fn App() -> impl IntoView {
@@ -15,6 +29,147 @@ pub(crate) fn App() -> impl IntoView {
     let (active_theme, set_active_theme) = signal("dark");
     let (settings, set_settings) = signal(None::<LauncherSettings>);
     let (modpacks, set_modpacks) = signal(Vec::<LauncherModpack>::new());
+    let (auth, set_auth) = signal(None::<LauncherAuthStatus>);
+    let (auth_pending, set_auth_pending) = signal(false);
+    let (github_pending, set_github_pending) = signal(false);
+    let (auth_error, set_auth_error) = signal(None::<String>);
+    let (registry_scan, set_registry_scan) = signal(None::<RegistryScan>);
+    let (registry_progress, set_registry_progress) = signal(None::<RegistryScanProgress>);
+    let (registry_pending, set_registry_pending) = signal(false);
+    let (registry_error, set_registry_error) = signal(None::<String>);
+    let (registry_notice, set_registry_notice) = signal(None::<String>);
+    let (registry_rescan_pending, set_registry_rescan_pending) = signal(None::<String>);
+
+    let upload_sign_in = Callback::new(move |()| {
+        set_auth_error.set(None);
+        set_auth_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match start_oauth_login(None).await {
+                Ok(status) => {
+                    let is_complete = status.profile.is_some();
+                    set_auth.set(Some(status));
+                    if is_complete {
+                        set_auth_pending.set(false);
+                    } else {
+                        poll_auth_until_complete(set_auth, set_auth_pending, set_auth_error).await;
+                    }
+                }
+                Err(error) => {
+                    set_auth_error.set(Some(js_error_message(error)));
+                    set_auth_pending.set(false);
+                }
+            }
+        });
+    });
+    let upload_connect_github = Callback::new(move |()| {
+        set_auth_error.set(None);
+        set_github_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match start_github_connect().await {
+                Ok(status) => {
+                    set_auth.set(Some(status));
+                    poll_github_until_complete(
+                        set_auth,
+                        github_pending,
+                        set_github_pending,
+                        set_auth_error,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    set_auth_error.set(Some(js_error_message(error)));
+                    set_github_pending.set(false);
+                }
+            }
+        });
+    });
+    let upload_scan = Callback::new(move |input: RegistryScanRequest| {
+        set_registry_error.set(None);
+        set_registry_notice.set(None);
+        set_registry_scan.set(None);
+        set_registry_progress.set(None);
+        set_registry_pending.set(true);
+        leptos::task::spawn_local(async move {
+            let result = async {
+                let started = registry_start_scan(input).await.map_err(js_error_message)?;
+                poll_registry_scan(&started.job_id, set_registry_progress).await
+            }
+            .await;
+            match result {
+                Ok(scan) => set_registry_scan.set(Some(scan)),
+                Err(error) => set_registry_error.set(Some(error)),
+            }
+            set_registry_pending.set(false);
+        });
+    });
+    let upload_publish = Callback::new(move |input: RegistryPublishRequest| {
+        let Some(scan_id) = registry_scan.get_untracked().map(|scan| scan.scan_id) else {
+            set_registry_error.set(Some("Run a scan before publishing.".to_owned()));
+            return;
+        };
+        set_registry_error.set(None);
+        set_registry_notice.set(None);
+        set_registry_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match registry_publish_scan(&scan_id, input).await {
+                Ok(published) => {
+                    set_registry_notice.set(Some(format!(
+                        "Published {} mod version{}.",
+                        published.published.len(),
+                        if published.published.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )));
+                    if let Ok(scan) = registry_get_scan(&scan_id).await {
+                        set_registry_scan.set(Some(scan));
+                    }
+                    if let Ok(status) = refresh_auth_profile().await {
+                        set_auth.set(Some(status));
+                    }
+                }
+                Err(error) => set_registry_error.set(Some(js_error_message(error))),
+            }
+            set_registry_pending.set(false);
+        });
+    });
+    let profile_rescan = Callback::new(move |mod_id: String| {
+        set_registry_error.set(None);
+        set_registry_progress.set(None);
+        set_registry_scan.set(None);
+        set_registry_rescan_pending.set(Some(mod_id.clone()));
+        set_registry_pending.set(true);
+        set_active_tab.set(AppTab::Upload);
+        leptos::task::spawn_local(async move {
+            let result = async {
+                let started = registry_start_rescan(&mod_id)
+                    .await
+                    .map_err(js_error_message)?;
+                poll_registry_scan(&started.job_id, set_registry_progress).await
+            }
+            .await;
+            match result {
+                Ok(scan) => {
+                    set_registry_scan.set(Some(scan));
+                    set_registry_notice.set(None);
+                }
+                Err(error) => set_registry_error.set(Some(error)),
+            }
+            set_registry_rescan_pending.set(None);
+            set_registry_pending.set(false);
+        });
+    });
+
+    let _ = listen_patchwork_auth(move |event| {
+        set_auth.set(Some(event.status.clone()));
+        set_auth_error.set(event.error);
+        set_auth_pending.set(false);
+        set_github_pending.set(false);
+        if event.status.profile.is_some() {
+            set_active_tab.set(AppTab::Profile);
+        }
+    });
 
     leptos::task::spawn_local(async move {
         if let Ok(loaded_settings) = load_launcher_settings().await {
@@ -26,11 +181,31 @@ pub(crate) fn App() -> impl IntoView {
             set_selected_modpack.set(0);
             set_modpacks.set(loaded_modpacks);
         }
+
+        if let Ok(status) = auth_status().await {
+            let should_refresh = status.profile.is_some();
+            set_auth.set(Some(status));
+
+            if should_refresh {
+                match refresh_auth_profile().await {
+                    Ok(status) => {
+                        set_auth.set(Some(status));
+                        set_auth_error.set(None);
+                    }
+                    Err(error) => {
+                        set_auth_error.set(Some(format!(
+                            "Could not refresh your profile: {}",
+                            js_error_message(error)
+                        )));
+                    }
+                }
+            }
+        }
     });
 
     view! {
         <div class="app-shell" data-theme=move || active_theme.get()>
-            <TopBar active_tab set_active_tab />
+            <TopBar active_tab set_active_tab auth set_auth auth_pending set_auth_pending auth_error set_auth_error />
 
             <div class="workspace">
                 <section class=move || page_class(active_tab.get() == AppTab::Home)>
@@ -43,7 +218,36 @@ pub(crate) fn App() -> impl IntoView {
                 </section>
 
                 <section class=move || page_class(active_tab.get() == AppTab::Browse)>
-                    <BrowsePage />
+                    <BrowsePage allow_downloads=true />
+                </section>
+
+                <section class=move || page_class(active_tab.get() == AppTab::Upload)>
+                    <UploadPage
+                        authenticated=Signal::derive(move || auth.get().and_then(|status| status.profile).is_some())
+                        github_connected=Signal::derive(move || auth.get().and_then(|status| status.profile).and_then(|profile| profile.github).is_some())
+                        scan=Signal::from(registry_scan)
+                        progress=Signal::from(registry_progress)
+                        pending=Signal::from(registry_pending)
+                        error=Signal::from(registry_error)
+                        notice=Signal::from(registry_notice)
+                        on_sign_in=upload_sign_in
+                        on_connect_github=upload_connect_github
+                        on_scan=upload_scan
+                        on_publish=upload_publish
+                    />
+                </section>
+
+                <section class=move || page_class(active_tab.get() == AppTab::Profile)>
+                    <AppProfilePage
+                        auth
+                        set_auth
+                        set_auth_error
+                        github_pending
+                        set_github_pending
+                        on_rescan=profile_rescan
+                        rescan_pending=Signal::from(registry_rescan_pending)
+                        registry_error=Signal::from(registry_error)
+                    />
                 </section>
 
                 <section class=move || page_class(active_tab.get() == AppTab::Settings)>
@@ -62,7 +266,38 @@ pub(crate) fn App() -> impl IntoView {
 }
 
 #[component]
-fn TopBar(active_tab: ReadSignal<AppTab>, set_active_tab: WriteSignal<AppTab>) -> impl IntoView {
+fn TopBar(
+    active_tab: ReadSignal<AppTab>,
+    set_active_tab: WriteSignal<AppTab>,
+    auth: ReadSignal<Option<LauncherAuthStatus>>,
+    set_auth: WriteSignal<Option<LauncherAuthStatus>>,
+    auth_pending: ReadSignal<bool>,
+    set_auth_pending: WriteSignal<bool>,
+    auth_error: ReadSignal<Option<String>>,
+    set_auth_error: WriteSignal<Option<String>>,
+) -> impl IntoView {
+    let start_login = move |_| {
+        set_auth_error.set(None);
+        set_auth_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match start_oauth_login(None).await {
+                Ok(status) => {
+                    let is_complete = status.profile.is_some();
+                    set_auth.set(Some(status));
+                    if is_complete {
+                        set_auth_pending.set(false);
+                    } else {
+                        poll_auth_until_complete(set_auth, set_auth_pending, set_auth_error).await;
+                    }
+                }
+                Err(error) => {
+                    set_auth_error.set(Some(js_error_message(error)));
+                    set_auth_pending.set(false);
+                }
+            }
+        });
+    };
+
     view! {
         <header class="topbar">
             <div class="brand">
@@ -95,6 +330,15 @@ fn TopBar(active_tab: ReadSignal<AppTab>, set_active_tab: WriteSignal<AppTab>) -
 
                 <button
                     type="button"
+                    class=move || top_tab_class(active_tab.get() == AppTab::Upload)
+                    on:click=move |_| set_active_tab.set(AppTab::Upload)
+                >
+                    <UploadIcon />
+                    <span>"Upload"</span>
+                </button>
+
+                <button
+                    type="button"
                     class=move || top_tab_class(active_tab.get() == AppTab::Settings)
                     on:click=move |_| set_active_tab.set(AppTab::Settings)
                 >
@@ -104,12 +348,255 @@ fn TopBar(active_tab: ReadSignal<AppTab>, set_active_tab: WriteSignal<AppTab>) -
             </nav>
 
             <div class="topbar-actions">
-                <button type="button" class="sign-in-button">
-                    <span>"Sign in"</span>
-                    <ArrowRightToBracketIcon />
-                </button>
+                <Show
+                    when=move || auth.get().and_then(|status| status.profile).is_some()
+                    fallback=move || view! {
+                        <button type="button" class="sign-in-button" on:click=start_login disabled=move || auth_pending.get()>
+                            <span>{move || if auth_pending.get() { "Signing in" } else { "Sign in / Sign up" }}</span>
+                            <ArrowRightToBracketIcon />
+                        </button>
+                    }
+                >
+                    {move || {
+                        auth.get()
+                            .and_then(|status| status.profile)
+                            .map(|profile| view! {
+                                <button
+                                    type="button"
+                                    class=move || top_tab_class(active_tab.get() == AppTab::Profile)
+                                    on:click=move |_| set_active_tab.set(AppTab::Profile)
+                                >
+                                    <UserIcon />
+                                    <span>{profile.account.nickname}</span>
+                                </button>
+                            })
+                    }}
+                </Show>
+                <Show when=move || auth_error.get().is_some()>
+                    <span class="auth-inline-error">{move || auth_error.get().unwrap_or_default()}</span>
+                </Show>
             </div>
         </header>
+    }
+}
+
+#[component]
+fn AppProfilePage(
+    auth: ReadSignal<Option<LauncherAuthStatus>>,
+    set_auth: WriteSignal<Option<LauncherAuthStatus>>,
+    set_auth_error: WriteSignal<Option<String>>,
+    github_pending: ReadSignal<bool>,
+    set_github_pending: WriteSignal<bool>,
+    on_rescan: Callback<String>,
+    rescan_pending: Signal<Option<String>>,
+    registry_error: Signal<Option<String>>,
+) -> impl IntoView {
+    let (editing_nickname, set_editing_nickname) = signal(false);
+    let (nickname_draft, set_nickname_draft) = signal(String::new());
+    let (nickname_error, set_nickname_error) = signal(None::<String>);
+
+    let sign_out = move |_| {
+        set_auth_error.set(None);
+        leptos::task::spawn_local(async move {
+            match logout_auth().await {
+                Ok(status) => set_auth.set(Some(status)),
+                Err(error) => set_auth_error.set(Some(js_error_message(error))),
+            }
+        });
+    };
+
+    view! {
+        {move || {
+            auth.get()
+                .and_then(|status| status.profile)
+                .map(|profile| view! {
+                    <div class="profile-page-shell">
+                        <ProfilePage
+                            account_email=profile.account.email.clone()
+                            account_name=profile.account.nickname.clone()
+                            mods=ui_projects(&profile.mods)
+                            modpacks=ui_projects(&profile.modpacks)
+                            on_rescan
+                            rescan_pending
+                        >
+                            <AppGithubConnection
+                                github=profile.github.clone()
+                                set_auth
+                                set_auth_error
+                                github_pending
+                                set_github_pending
+                            />
+                        </ProfilePage>
+                        <div class="profile-local-actions">
+                            <Show
+                                when=move || editing_nickname.get()
+                                fallback=move || view! {
+                                    <button
+                                        type="button"
+                                        class="catalog-secondary-action"
+                                        on:click=move |_| {
+                                            if let Some(status) = auth.get() {
+                                                if let Some(profile) = status.profile {
+                                                    set_nickname_draft.set(profile.account.nickname);
+                                                }
+                                            }
+                                            set_nickname_error.set(None);
+                                            set_editing_nickname.set(true);
+                                        }
+                                    >
+                                        "Change username"
+                                    </button>
+                                }
+                            >
+                                <div class="nickname-editor">
+                                    <input
+                                        maxlength="16"
+                                        prop:value=move || nickname_draft.get()
+                                        on:input=move |event| set_nickname_draft.set(event_target_value(&event))
+                                    />
+                                    <button
+                                        type="button"
+                                        class="catalog-primary-action"
+                                        on:click=move |_| {
+                                            let nickname = nickname_draft.get();
+                                            set_nickname_error.set(None);
+                                            leptos::task::spawn_local(async move {
+                                                match update_auth_nickname(&nickname).await {
+                                                    Ok(status) => {
+                                                        set_auth.set(Some(status));
+                                                        set_editing_nickname.set(false);
+                                                    }
+                                                    Err(error) => set_nickname_error.set(Some(js_error_message(error))),
+                                                }
+                                            });
+                                        }
+                                    >
+                                        "Save"
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="catalog-secondary-action"
+                                        on:click=move |_| set_editing_nickname.set(false)
+                                    >
+                                        "Cancel"
+                                    </button>
+                                </div>
+                            </Show>
+                            <button type="button" class="catalog-secondary-action" on:click=sign_out>
+                                "Sign out"
+                            </button>
+                        </div>
+                        <Show when=move || nickname_error.get().is_some()>
+                            <p class="auth-inline-error">{move || nickname_error.get().unwrap_or_default()}</p>
+                        </Show>
+                        <Show when=move || registry_error.get().is_some()>
+                            <p class="auth-inline-error">{move || registry_error.get().unwrap_or_default()}</p>
+                        </Show>
+                    </div>
+                }.into_any())
+                .unwrap_or_else(|| view! {
+                    <section class="signed-out-profile">
+                        <UserIcon />
+                        <h1>"Publisher profile"</h1>
+                        <p>"Sign in to see your published mods and modpacks."</p>
+                    </section>
+                }.into_any())
+        }}
+    }
+}
+
+#[component]
+fn AppGithubConnection(
+    github: Option<crate::model::GithubAccount>,
+    set_auth: WriteSignal<Option<LauncherAuthStatus>>,
+    set_auth_error: WriteSignal<Option<String>>,
+    github_pending: ReadSignal<bool>,
+    set_github_pending: WriteSignal<bool>,
+) -> impl IntoView {
+    let content = if let Some(github) = github {
+        view! {
+            <div class="github-account-row">
+                <img
+                    src=github.github_avatar_url
+                    alt="GitHub avatar"
+                    loading="lazy"
+                    referrerpolicy="no-referrer"
+                />
+                <div>
+                    <strong>{format!("@{}", github.github_login)}</strong>
+                    <span>{format!("GitHub user ID {}", github.github_user_id)}</span>
+                </div>
+                <button
+                    type="button"
+                    class="danger-secondary-action"
+                    disabled=move || github_pending.get()
+                    on:click=move |_| {
+                        set_auth_error.set(None);
+                        set_github_pending.set(true);
+                        leptos::task::spawn_local(async move {
+                            match disconnect_github().await {
+                                Ok(status) => set_auth.set(Some(status)),
+                                Err(error) => set_auth_error.set(Some(js_error_message(error))),
+                            }
+                            set_github_pending.set(false);
+                        });
+                    }
+                >
+                    {move || if github_pending.get() { "Disconnecting" } else { "Disconnect GitHub" }}
+                </button>
+            </div>
+        }
+        .into_any()
+    } else {
+        view! {
+            <div class="github-connect-empty">
+                <p>"Connect the GitHub identity you will use to publish projects."</p>
+                <button
+                    type="button"
+                    class="catalog-primary-action"
+                    disabled=move || github_pending.get()
+                    on:click=move |_| {
+                        set_auth_error.set(None);
+                        set_github_pending.set(true);
+                        leptos::task::spawn_local(async move {
+                            match start_github_connect().await {
+                                Ok(status) => {
+                                    set_auth.set(Some(status));
+                                    poll_github_until_complete(
+                                        set_auth,
+                                        github_pending,
+                                        set_github_pending,
+                                        set_auth_error,
+                                    )
+                                    .await;
+                                }
+                                Err(error) => {
+                                    set_auth_error.set(Some(js_error_message(error)));
+                                    set_github_pending.set(false);
+                                }
+                            }
+                        });
+                    }
+                >
+                    <GithubIcon />
+                    <span>{move || if github_pending.get() { "Waiting for GitHub" } else { "Connect GitHub" }}</span>
+                </button>
+            </div>
+        }
+        .into_any()
+    };
+
+    view! {
+        <section class="github-connection">
+            <div class="github-connection-heading">
+                <div>
+                    <p class="catalog-kicker">"Connected account"</p>
+                    <h2>"GitHub"</h2>
+                </div>
+                <GithubIcon />
+            </div>
+            {content}
+        </section>
     }
 }
 
@@ -136,4 +623,125 @@ fn theme_id_or_default(theme: &str) -> &'static str {
         "terminal" => "terminal",
         _ => "dark",
     }
+}
+
+fn ui_projects(projects: &[crate::model::PublishedProject]) -> Vec<UiPublishedProject> {
+    projects
+        .iter()
+        .map(|project| UiPublishedProject {
+            id: project.id.clone(),
+            title: project.title.clone(),
+            kind: project.kind.clone(),
+            downloads: project.downloads,
+            latest_version: project.latest_version.clone(),
+            repository_url: project.repository_url.clone(),
+            repository_path: project.repository_path.clone(),
+            can_rescan: project.can_rescan,
+        })
+        .collect()
+}
+
+fn js_error_message(error: wasm_bindgen::JsValue) -> String {
+    error
+        .as_string()
+        .unwrap_or_else(|| "Patchwork command failed".to_string())
+}
+
+async fn poll_auth_until_complete(
+    set_auth: WriteSignal<Option<LauncherAuthStatus>>,
+    set_auth_pending: WriteSignal<bool>,
+    set_auth_error: WriteSignal<Option<String>>,
+) {
+    for _ in 0..300 {
+        sleep_ms(1_000).await;
+        if let Ok(status) = auth_status().await {
+            let is_complete = status.profile.is_some();
+            set_auth.set(Some(status));
+            if is_complete {
+                set_auth_pending.set(false);
+                set_auth_error.set(None);
+                return;
+            }
+        }
+    }
+    set_auth_pending.set(false);
+    set_auth_error.set(Some("Login did not finish in time.".to_string()));
+}
+
+async fn poll_github_until_complete(
+    set_auth: WriteSignal<Option<LauncherAuthStatus>>,
+    github_pending: ReadSignal<bool>,
+    set_github_pending: WriteSignal<bool>,
+    set_auth_error: WriteSignal<Option<String>>,
+) {
+    for _ in 0..600 {
+        sleep_ms(500).await;
+        if !github_pending.get_untracked() {
+            return;
+        }
+
+        if let Ok(status) = auth_status().await {
+            let connected = status
+                .profile
+                .as_ref()
+                .and_then(|profile| profile.github.as_ref())
+                .is_some();
+            set_auth.set(Some(status));
+            if connected {
+                set_github_pending.set(false);
+                set_auth_error.set(None);
+                return;
+            }
+        }
+    }
+
+    set_github_pending.set(false);
+    set_auth_error.set(Some(
+        "GitHub connection did not finish in time.".to_string(),
+    ));
+}
+
+async fn poll_registry_scan(
+    job_id: &str,
+    set_progress: WriteSignal<Option<RegistryScanProgress>>,
+) -> Result<RegistryScan, String> {
+    for _ in 0..2_400 {
+        let progress = registry_scan_progress(job_id)
+            .await
+            .map_err(js_error_message)?;
+        let phase = progress.phase;
+        let result = match phase {
+            RegistryScanPhase::Complete => progress
+                .scan
+                .clone()
+                .ok_or_else(|| "repository scan completed without a persisted preview".to_owned()),
+            RegistryScanPhase::Failed => Err(progress
+                .error
+                .clone()
+                .unwrap_or_else(|| "repository scan failed".to_owned())),
+            _ => {
+                set_progress.set(Some(progress));
+                sleep_ms(250).await;
+                continue;
+            }
+        };
+        set_progress.set(Some(progress));
+        return result;
+    }
+    Err("repository scan did not finish in time".to_owned())
+}
+
+async fn sleep_ms(milliseconds: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::NULL);
+        });
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                milliseconds,
+            );
+        }
+    });
+    let _ = JsFuture::from(promise).await;
 }

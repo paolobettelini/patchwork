@@ -2,4 +2,10 @@ book
 target
 temp
 cache
+#documentation
+*.sqlite
+*.pem
+
+# all the keys and secrets
+patchwork.toml
 documentation

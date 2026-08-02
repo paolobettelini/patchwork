@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub(crate) enum AppTab {
     Home,
     Browse,
+    Upload,
+    Profile,
     Settings,
 }
 
@@ -107,13 +109,59 @@ pub(crate) struct PatchworkTaskStatus {
     pub(crate) core_error: Option<String>,
 }
 
-pub(crate) const THEMES: [(&str, &str); 8] = [
-    ("dark", "Dark"),
-    ("dim-white", "Bianco scuro"),
-    ("aurora", "Aurora"),
-    ("volcanic", "Volcanic"),
-    ("nebula", "Nebula"),
-    ("moss", "Moss"),
-    ("bubblegum", "Bubblegum"),
-    ("terminal", "Terminal"),
-];
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherAuthStatus {
+    pub(crate) server_url: String,
+    pub(crate) profile: Option<AuthProfile>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PatchworkAuthEvent {
+    pub(crate) status: LauncherAuthStatus,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthProfile {
+    pub(crate) account: AuthAccount,
+    #[serde(default)]
+    pub(crate) github: Option<GithubAccount>,
+    pub(crate) mods: Vec<PublishedProject>,
+    pub(crate) modpacks: Vec<PublishedProject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubAccount {
+    pub(crate) github_user_id: i64,
+    pub(crate) github_login: String,
+    pub(crate) github_avatar_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthAccount {
+    pub(crate) uuid: String,
+    pub(crate) nickname: String,
+    pub(crate) email: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublishedProject {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    pub(crate) downloads: i64,
+    #[serde(default)]
+    pub(crate) latest_version: Option<String>,
+    #[serde(default)]
+    pub(crate) repository_url: Option<String>,
+    #[serde(default)]
+    pub(crate) repository_path: Option<String>,
+    #[serde(default)]
+    pub(crate) can_rescan: bool,
+}

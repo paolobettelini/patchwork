@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::error::{PatchworkError, Result};
@@ -19,7 +19,7 @@ pub struct Modpack {
     pub ignore: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Dependencies {
     #[serde(default)]
     pub init: Vec<String>,
@@ -29,8 +29,10 @@ pub struct Dependencies {
     pub ownership: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModInfo {
+    #[serde(default)]
+    pub title: Option<String>,
     #[serde(default)]
     pub entry: Option<String>,
     #[serde(default)]
@@ -101,7 +103,7 @@ pub struct CargoPackageMetadata {
     pub mod_info: Option<ModInfo>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CodegenDeclaration {
     #[serde(rename = "crate")]
     pub package: String,
@@ -112,7 +114,7 @@ pub struct CodegenDeclaration {
     pub dev_crate: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CodegenGenerator {
     #[serde(rename = "crate")]
     pub crate_name: String,

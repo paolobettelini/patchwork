@@ -1,12 +1,17 @@
 use crate::model::{
-    DependencyPage, LauncherModpack, LauncherSettings, PatchworkConsoleEvent, PatchworkTaskStatus,
-    SelectedIconFile,
+    DependencyPage, LauncherAuthStatus, LauncherModpack, LauncherSettings, PatchworkAuthEvent,
+    PatchworkConsoleEvent, PatchworkTaskStatus, SelectedIconFile,
+};
+use patchwork_registry_types::{
+    RegistryPublishRequest, RegistryPublishResponse, RegistryScan, RegistryScanJobStarted,
+    RegistryScanProgress, RegistryScanRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, prelude::*};
 use wasm_bindgen_futures::JsFuture;
 
 const PATCHWORK_CONSOLE_EVENT: &str = "patchwork-console";
+const PATCHWORK_AUTH_EVENT: &str = "patchwork-auth";
 
 pub(crate) async fn select_folder() -> Result<Option<String>, JsValue> {
     invoke("select_folder", &()).await
@@ -22,6 +27,102 @@ pub(crate) async fn select_icon_file() -> Result<Option<SelectedIconFile>, JsVal
 
 pub(crate) async fn load_launcher_settings() -> Result<LauncherSettings, JsValue> {
     invoke("load_launcher_settings", &()).await
+}
+
+pub(crate) async fn auth_status() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("auth_status", &()).await
+}
+
+pub(crate) async fn refresh_auth_profile() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("refresh_auth_profile", &()).await
+}
+
+pub(crate) async fn start_oauth_login(
+    server_url: Option<&str>,
+) -> Result<LauncherAuthStatus, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "serverUrl")]
+        server_url: Option<&'a str>,
+    }
+
+    invoke("start_oauth_login", &Args { server_url }).await
+}
+
+pub(crate) async fn logout_auth() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("logout_auth", &()).await
+}
+
+pub(crate) async fn start_github_connect() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("start_github_connect", &()).await
+}
+
+pub(crate) async fn disconnect_github() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("disconnect_github", &()).await
+}
+
+pub(crate) async fn update_auth_nickname(nickname: &str) -> Result<LauncherAuthStatus, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        nickname: &'a str,
+    }
+
+    invoke("update_auth_nickname", &Args { nickname }).await
+}
+
+pub(crate) async fn registry_start_scan(
+    input: RegistryScanRequest,
+) -> Result<RegistryScanJobStarted, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        input: RegistryScanRequest,
+    }
+
+    invoke("registry_start_scan", &Args { input }).await
+}
+
+pub(crate) async fn registry_scan_progress(job_id: &str) -> Result<RegistryScanProgress, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "jobId")]
+        job_id: &'a str,
+    }
+
+    invoke("registry_scan_progress", &Args { job_id }).await
+}
+
+pub(crate) async fn registry_get_scan(scan_id: &str) -> Result<RegistryScan, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "scanId")]
+        scan_id: &'a str,
+    }
+
+    invoke("registry_get_scan", &Args { scan_id }).await
+}
+
+pub(crate) async fn registry_publish_scan(
+    scan_id: &str,
+    input: RegistryPublishRequest,
+) -> Result<RegistryPublishResponse, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "scanId")]
+        scan_id: &'a str,
+        input: RegistryPublishRequest,
+    }
+
+    invoke("registry_publish_scan", &Args { scan_id, input }).await
+}
+
+pub(crate) async fn registry_start_rescan(mod_id: &str) -> Result<RegistryScanJobStarted, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "modId")]
+        mod_id: &'a str,
+    }
+
+    invoke("registry_start_rescan", &Args { mod_id }).await
 }
 
 pub(crate) async fn update_launcher_path(
@@ -235,6 +336,34 @@ where
     let _ = listen.call2(
         &event_api,
         &JsValue::from_str(PATCHWORK_CONSOLE_EVENT),
+        closure.as_ref().unchecked_ref(),
+    )?;
+    closure.forget();
+    Ok(())
+}
+
+pub(crate) fn listen_patchwork_auth<F>(mut callback: F) -> Result<(), JsValue>
+where
+    F: FnMut(PatchworkAuthEvent) + 'static,
+{
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is not available"))?;
+    let tauri = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__"))?;
+    let event_api = js_sys::Reflect::get(&tauri, &JsValue::from_str("event"))?;
+    let listen = js_sys::Reflect::get(&event_api, &JsValue::from_str("listen"))?
+        .dyn_into::<js_sys::Function>()?;
+
+    let closure = Closure::wrap(Box::new(move |event: JsValue| {
+        let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload")) else {
+            return;
+        };
+        if let Ok(event) = serde_wasm_bindgen::from_value::<PatchworkAuthEvent>(payload) {
+            callback(event);
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+
+    let _ = listen.call2(
+        &event_api,
+        &JsValue::from_str(PATCHWORK_AUTH_EVENT),
         closure.as_ref().unchecked_ref(),
     )?;
     closure.forget();

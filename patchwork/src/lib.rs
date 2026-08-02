@@ -8,6 +8,7 @@ mod model;
 mod modpacks;
 mod paths;
 mod project;
+mod registry;
 
 pub use browser::{
     DependencyDiagnostic, DependencyEntry, DependencyPage, DependencyPageKind, DependencyTarget,
@@ -15,6 +16,7 @@ pub use browser::{
 };
 pub use error::{PatchworkError, Result};
 pub use model::{CodegenDeclaration, CodegenGenerator, Dependencies, ModInfo, Modpack};
+pub use registry::{RegistryModManifest, RegistryWorkspaceManifest, parse_registry_mod_manifest};
 
 pub fn compose_with_modpacks<P: AsRef<Path>, Q: AsRef<Path>, R: AsRef<Path>, S: AsRef<Path>>(
     modpack: P,

@@ -52,8 +52,7 @@ pub fn resolve_tasks(
             }
 
             let output_crate_dir = cache_folder.join(&declaration.package);
-            let temporary_output_crate_dir =
-                cache_folder.join("temp").join(&declaration.package);
+            let temporary_output_crate_dir = cache_folder.join("temp").join(&declaration.package);
             let dev_crate_dir = declaration
                 .dev_crate
                 .as_deref()
@@ -92,10 +91,7 @@ pub fn run_tasks(
     tasks: &[ResolvedCodegenTask],
 ) -> Result<()> {
     for task in tasks {
-        prepare_generated_crate_backup(
-            &task.output_crate_dir,
-            &task.temporary_output_crate_dir,
-        )?;
+        prepare_generated_crate_backup(&task.output_crate_dir, &task.temporary_output_crate_dir)?;
 
         let had_existing_output = task.temporary_output_crate_dir.is_dir();
         let mut command = Command::new("cargo");
@@ -164,17 +160,10 @@ pub fn run_tasks(
 fn prepare_generated_crate_backup(output_directory: &Path, backup_directory: &Path) -> Result<()> {
     if backup_directory.is_dir() {
         if output_directory.is_dir() {
-            remove_directory_if_exists(
-                backup_directory,
-                "remove stale generated crate backup",
-            )?;
+            remove_directory_if_exists(backup_directory, "remove stale generated crate backup")?;
         } else {
             fs::rename(backup_directory, output_directory).map_err(|source| {
-                PatchworkError::io(
-                    "recover generated crate backup",
-                    backup_directory,
-                    source,
-                )
+                PatchworkError::io("recover generated crate backup", backup_directory, source)
             })?;
         }
     }
@@ -183,11 +172,7 @@ fn prepare_generated_crate_backup(output_directory: &Path, backup_directory: &Pa
         .parent()
         .expect("temporary generated crate must have a parent directory");
     fs::create_dir_all(temporary_root).map_err(|source| {
-        PatchworkError::io(
-            "create codegen temporary directory",
-            temporary_root,
-            source,
-        )
+        PatchworkError::io("create codegen temporary directory", temporary_root, source)
     })?;
 
     if output_directory.is_dir() {
@@ -208,18 +193,11 @@ fn restore_generated_crate_backup(
     backup_directory: &Path,
     had_existing_output: bool,
 ) -> Result<()> {
-    remove_directory_if_exists(
-        output_directory,
-        "remove incomplete generated crate",
-    )?;
+    remove_directory_if_exists(output_directory, "remove incomplete generated crate")?;
 
     if had_existing_output {
         fs::rename(backup_directory, output_directory).map_err(|source| {
-            PatchworkError::io(
-                "restore generated crate backup",
-                backup_directory,
-                source,
-            )
+            PatchworkError::io("restore generated crate backup", backup_directory, source)
         })?;
     }
 
@@ -248,10 +226,7 @@ fn finish_generated_crate(
     };
 
     if unchanged {
-        remove_directory_if_exists(
-            output_directory,
-            "remove unchanged regenerated crate",
-        )?;
+        remove_directory_if_exists(output_directory, "remove unchanged regenerated crate")?;
         fs::rename(backup_directory, output_directory).map_err(|source| {
             PatchworkError::io(
                 "restore unchanged generated crate",
@@ -260,10 +235,7 @@ fn finish_generated_crate(
             )
         })?;
     } else {
-        remove_directory_if_exists(
-            backup_directory,
-            "remove outdated generated crate backup",
-        )?;
+        remove_directory_if_exists(backup_directory, "remove outdated generated crate backup")?;
     }
 
     Ok(())
@@ -285,18 +257,10 @@ fn directories_equal(left: &Path, right: &Path) -> Result<bool> {
         let left_path = left_entry.path();
         let right_path = right_entry.path();
         let left_type = left_entry.file_type().map_err(|source| {
-            PatchworkError::io(
-                "read regenerated crate entry type",
-                &left_path,
-                source,
-            )
+            PatchworkError::io("read regenerated crate entry type", &left_path, source)
         })?;
         let right_type = right_entry.file_type().map_err(|source| {
-            PatchworkError::io(
-                "read previous generated entry type",
-                &right_path,
-                source,
-            )
+            PatchworkError::io("read previous generated entry type", &right_path, source)
         })?;
 
         if left_type.is_dir() && right_type.is_dir() {
@@ -341,11 +305,7 @@ fn sorted_directory_entries(directory: &Path) -> Result<Vec<fs::DirEntry>> {
     let mut entries = entries
         .map(|entry| {
             entry.map_err(|source| {
-                PatchworkError::io(
-                    "read generated crate directory entry",
-                    directory,
-                    source,
-                )
+                PatchworkError::io("read generated crate directory entry", directory, source)
             })
         })
         .collect::<Result<Vec<_>>>()?;

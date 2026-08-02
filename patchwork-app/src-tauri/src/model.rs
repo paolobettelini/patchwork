@@ -11,7 +11,11 @@ use crate::paths::{display_path, expand_env_vars};
 
 pub(crate) const SETTINGS_FILE: &str = "settings.json";
 pub(crate) const SETTINGS_POINTER_FILE: &str = "settings-path.json";
+pub(crate) const AUTH_FILE: &str = "auth.json";
+pub(crate) const CONFIG_DIR: &str = "config";
 pub(crate) const PATCHWORK_CONSOLE_EVENT: &str = "patchwork-console";
+pub(crate) const PATCHWORK_AUTH_EVENT: &str = "patchwork-auth";
+pub(crate) const DEFAULT_AUTH_SERVER_URL: &str = "http://127.0.0.1:8080";
 pub(crate) const DEFAULT_DESCRIPTION: &str = "A new Patchwork modpack.";
 pub(crate) const DEFAULT_TERMINAL_ROWS: u16 = 24;
 pub(crate) const DEFAULT_TERMINAL_COLS: u16 = 100;
@@ -21,6 +25,8 @@ pub(crate) struct AppState {
     pub(crate) settings_pointer_path: PathBuf,
     pub(crate) settings_path: Mutex<PathBuf>,
     pub(crate) settings: Mutex<LauncherSettings>,
+    pub(crate) auth_path: PathBuf,
+    pub(crate) auth: Mutex<StoredAuthState>,
     pub(crate) tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
 }
 
@@ -58,16 +64,105 @@ pub(crate) struct LauncherSettings {
     pub(crate) settings_file: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StoredAuthState {
+    #[serde(default = "default_auth_server_url")]
+    pub(crate) server_url: String,
+    #[serde(default)]
+    pub(crate) access_token: Option<String>,
+    #[serde(default)]
+    pub(crate) profile: Option<AuthProfile>,
+}
+
+impl Default for StoredAuthState {
+    fn default() -> Self {
+        Self {
+            server_url: default_auth_server_url(),
+            access_token: None,
+            profile: None,
+        }
+    }
+}
+
+impl StoredAuthState {
+    pub(crate) fn status(&self) -> LauncherAuthStatus {
+        LauncherAuthStatus {
+            server_url: self.server_url.clone(),
+            profile: self.profile.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherAuthStatus {
+    pub(crate) server_url: String,
+    pub(crate) profile: Option<AuthProfile>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PatchworkAuthEvent {
+    pub(crate) status: LauncherAuthStatus,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthProfile {
+    pub(crate) account: AuthAccount,
+    #[serde(default)]
+    pub(crate) github: Option<GithubAccount>,
+    pub(crate) mods: Vec<PublishedProject>,
+    pub(crate) modpacks: Vec<PublishedProject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GithubAccount {
+    pub(crate) github_user_id: i64,
+    pub(crate) github_login: String,
+    pub(crate) github_avatar_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AuthAccount {
+    pub(crate) uuid: String,
+    pub(crate) nickname: String,
+    pub(crate) email: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublishedProject {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) kind: String,
+    pub(crate) downloads: i64,
+    #[serde(default)]
+    pub(crate) latest_version: Option<String>,
+    #[serde(default)]
+    pub(crate) repository_url: Option<String>,
+    #[serde(default)]
+    pub(crate) repository_path: Option<String>,
+    #[serde(default)]
+    pub(crate) can_rescan: bool,
+}
+
 impl LauncherSettings {
     pub(crate) fn default_for(patchwork_data: &Path) -> Self {
+        let config_dir = patchwork_data.join(CONFIG_DIR);
+        let cache_dir = patchwork_data.join("cache");
         Self {
             theme: default_theme(),
             cargo_target_dir: display_path(&patchwork_data.join("target")),
-            mod_cache: display_path(&patchwork_data.join("mods")),
-            modpacks_cache: display_path(&patchwork_data.join("modpacks")),
+            mod_cache: display_path(&cache_dir.join("mods")),
+            modpacks_cache: display_path(&cache_dir.join("modpacks")),
             profiles_dir: display_path(&patchwork_data.join("profiles")),
-            build_cache: display_path(&patchwork_data.join("build")),
-            settings_file: display_path(&patchwork_data.join(SETTINGS_FILE)),
+            build_cache: display_path(&cache_dir.join("build")),
+            settings_file: display_path(&config_dir.join(SETTINGS_FILE)),
         }
     }
 
@@ -233,4 +328,8 @@ pub(crate) struct SettingsPointer {
 
 pub(crate) fn default_theme() -> String {
     "dark".to_string()
+}
+
+pub(crate) fn default_auth_server_url() -> String {
+    DEFAULT_AUTH_SERVER_URL.to_string()
 }

@@ -2,7 +2,6 @@ use leptos::{mount::mount_to_body, prelude::*};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 mod app;
-mod browse;
 mod home;
 mod icons;
 mod model;

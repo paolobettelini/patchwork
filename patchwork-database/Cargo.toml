@@ -1,0 +1,26 @@
+[package]
+name = "patchwork-database"
+version = "0.1.0"
+edition = "2024"
+description = "Database layer for Patchwork accounts, mods and modpacks"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["diesel/sqlite"]
+mysql = ["diesel/mysql"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+diesel = { version = "2.3.11", default-features = false, features = ["32-column-tables", "chrono", "r2d2"] }
+diesel_migrations = "2.3.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+thiserror = "2.0"
+toml = "1.1"
+url = "2.5"
+uuid = { version = "1.24", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3.20"

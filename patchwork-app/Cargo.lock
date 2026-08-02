@@ -928,11 +928,28 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "leptos",
+ "patchwork-registry-types",
+ "patchwork-ui",
  "serde",
  "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "patchwork-registry-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "patchwork-ui"
+version = "0.1.0"
+dependencies = [
+ "leptos",
+ "patchwork-registry-types",
 ]
 
 [[package]]

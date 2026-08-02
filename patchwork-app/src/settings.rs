@@ -1,12 +1,13 @@
 use crate::{
     icons::{FolderIcon, TrashIcon},
-    model::{LauncherModpack, LauncherSettings, SettingsTab, THEMES},
+    model::{LauncherModpack, LauncherSettings, SettingsTab},
     tauri_bridge::{
         list_modpacks, select_folder, select_settings_file, update_launcher_path,
         update_launcher_theme,
     },
 };
 use leptos::prelude::*;
+use patchwork_ui::THEMES;
 use wasm_bindgen::JsValue;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

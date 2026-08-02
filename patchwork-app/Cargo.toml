@@ -14,6 +14,8 @@ path = "src/main.rs"
 console_error_panic_hook = "0.1.7"
 js-sys = "0.3"
 leptos = { version = "0.8.17", default-features = false }
+patchwork-ui = { path = "../patchwork-ui", default-features = false }
+patchwork-registry-types = { path = "../patchwork-registry-types" }
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
@@ -22,7 +24,7 @@ web-sys = { version = "0.3", features = ["HtmlDivElement", "Window"] }
 
 [features]
 default = ["csr"]
-csr = ["leptos/csr"]
+csr = ["leptos/csr", "patchwork-ui/csr"]
 
 [profile.wasm-release]
 inherits = "release"
