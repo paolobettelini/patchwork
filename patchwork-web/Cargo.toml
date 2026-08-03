@@ -23,6 +23,7 @@ console_error_panic_hook = { version = "0.1.7", optional = true }
 gloo-net = { version = "0.6", optional = true }
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }
 futures-util = { version = "0.3", optional = true }
+flate2 = { version = "1", optional = true }
 jsonwebtoken = { version = "9.3", optional = true }
 leptos = { version = "0.8.17", default-features = false }
 patchwork-database = { path = "../patchwork-database", optional = true }
@@ -37,6 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 toml = { version = "1.0", optional = true }
+tar = { version = "0.4", optional = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "1.24", features = ["serde"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
@@ -51,6 +53,7 @@ csr = [
     "dep:serde_json",
     "dep:sha2",
     "dep:wasm-bindgen",
+    "dep:url",
     "leptos/csr",
     "patchwork-ui/csr",
 ]
@@ -62,6 +65,7 @@ server = [
     "dep:chrono",
     "dep:clap",
     "dep:futures-util",
+    "dep:flate2",
     "dep:jsonwebtoken",
     "dep:patchwork-database",
     "dep:patchwork",
@@ -72,6 +76,7 @@ server = [
     "dep:serde_json",
     "dep:sha2",
     "dep:toml",
+    "dep:tar",
     "dep:url",
     "dep:uuid",
 ]

@@ -15,8 +15,14 @@ pub use browser::{
     inspect_dependency_page,
 };
 pub use error::{PatchworkError, Result};
-pub use model::{CodegenDeclaration, CodegenGenerator, Dependencies, ModInfo, Modpack};
-pub use registry::{RegistryModManifest, RegistryWorkspaceManifest, parse_registry_mod_manifest};
+pub use model::{
+    CodegenDeclaration, CodegenGenerator, Dependencies, ModInfo, Modpack, is_generated_mod_id,
+};
+pub use registry::{
+    RegistryDependencyTargetKind, RegistryModManifest, RegistryModpackDependency,
+    RegistryModpackManifest, RegistryWorkspaceManifest, parse_registry_dependency,
+    parse_registry_mod_manifest, parse_registry_modpack_manifest,
+};
 
 pub fn compose_with_modpacks<P: AsRef<Path>, Q: AsRef<Path>, R: AsRef<Path>, S: AsRef<Path>>(
     modpack: P,

@@ -1,23 +1,31 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::io::Cursor;
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use chrono::{Duration, SecondsFormat, Utc};
+use flate2::{Compression, write::GzEncoder};
 use futures_util::{StreamExt, stream};
-use patchwork::{RegistryWorkspaceManifest, parse_registry_mod_manifest};
+use patchwork::{
+    RegistryDependencyTargetKind, RegistryModpackManifest, RegistryWorkspaceManifest,
+    parse_registry_dependency, parse_registry_mod_manifest, parse_registry_modpack_manifest,
+};
 use patchwork_database::{
-    Account, CreateRegistryScan, CreateRegistryScanEntry, Database, DatabaseError,
-    RegistryModState, RegistryPublishResult, RegistryScanWithEntries,
+    Account, CreateRegistryScan, CreateRegistryScanEntry, Database, DatabaseError, Pagination,
+    PublishedMod, PublishedModpack, RegistryModState, RegistryModpackState, RegistryPublishResult,
+    RegistryScanWithEntries,
 };
 use patchwork_registry_types::{
-    RegistryDependency, RegistryDependencyKind, RegistryPublishRequest, RegistryPublishResponse,
-    RegistryPublishedVersion, RegistryRepository, RegistryScan, RegistryScanEntry,
-    RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress, RegistryScanRequest,
-    RegistryScanStatus,
+    RegistryBrowseProject, RegistryBrowseResponse, RegistryBrowseSource, RegistryDependency,
+    RegistryDependencyKind, RegistryProjectDetails, RegistryProjectKind, RegistryPublishRequest,
+    RegistryPublishResponse, RegistryPublishedVersion, RegistryRepository, RegistryScan,
+    RegistryScanEntry, RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress,
+    RegistryScanRequest, RegistryScanStatus, is_generated_mod_id,
 };
 use semver::Version;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -34,6 +42,12 @@ const MAX_MANIFESTS: usize = 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const GITHUB_BLOB_CONCURRENCY: usize = 12;
 const SCAN_JOB_RETENTION_MINUTES: u64 = 30;
+const MAX_PUBLISHED_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_PUBLISHED_README_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PUBLISHED_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PUBLISHED_SOURCE_FILES: usize = 20_000;
+const MAX_PUBLISHED_SOURCE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PUBLISHED_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct RegistryState {
@@ -121,7 +135,7 @@ impl ScanReporter {
 
     fn entry(&self, entry: RegistryScanEntry, completed: usize, total: usize) {
         self.with_progress(|progress| {
-            progress.phase = RegistryScanPhase::ValidatingMods;
+            progress.phase = RegistryScanPhase::ValidatingProjects;
             progress.completed = count_u32(completed);
             progress.total = Some(count_u32(total));
             progress.entries.push(entry);
@@ -161,6 +175,19 @@ fn count_u32(value: usize) -> u32 {
 
 pub(crate) fn configure(config: &mut web::ServiceConfig) {
     config
+        .route("/registry/search", web::get().to(search_registry))
+        .route(
+            "/registry/projects/{project_kind}/{project_id}",
+            web::get().to(get_project_details),
+        )
+        .route(
+            "/registry/projects/{project_kind}/{project_id}/source",
+            web::get().to(get_published_source),
+        )
+        .route(
+            "/registry/projects/{project_kind}/{project_id}/{artifact}",
+            web::get().to(get_published_artifact),
+        )
         .route("/registry/scans", web::post().to(create_scan))
         .route("/registry/scan-jobs", web::post().to(start_scan_job))
         .route("/registry/scan-jobs/{job_id}", web::get().to(get_scan_job))
@@ -173,7 +200,501 @@ pub(crate) fn configure(config: &mut web::ServiceConfig) {
         .route(
             "/registry/mods/{mod_id}/rescan-job",
             web::post().to(start_rescan_job),
+        )
+        .route(
+            "/registry/projects/{project_kind}/{project_id}/rescan",
+            web::post().to(rescan_project),
+        )
+        .route(
+            "/registry/projects/{project_kind}/{project_id}/rescan-job",
+            web::post().to(start_project_rescan_job),
         );
+}
+
+#[derive(Deserialize)]
+struct RegistrySearchQuery {
+    #[serde(default, alias = "query")]
+    q: String,
+    mods: Option<bool>,
+    modpacks: Option<bool>,
+}
+
+async fn search_registry(
+    state: web::Data<RegistryState>,
+    query: web::Query<RegistrySearchQuery>,
+) -> Result<HttpResponse> {
+    let pagination = Pagination::new(100, 0).map_err(database_http_error)?;
+    let mut projects = Vec::new();
+    if query.mods.unwrap_or(true) {
+        projects.extend(
+            state
+                .database
+                .search_mods(&query.q, pagination)
+                .map_err(database_http_error)?
+                .into_iter()
+                .map(browse_mod_dto),
+        );
+    }
+    if query.modpacks.unwrap_or(true) {
+        projects.extend(
+            state
+                .database
+                .search_modpacks(&query.q, pagination)
+                .map_err(database_http_error)?
+                .into_iter()
+                .map(browse_modpack_dto),
+        );
+    }
+    projects.retain(|project| {
+        project.project_kind != RegistryProjectKind::Mod
+            || !is_generated_mod_id(&project.project_id)
+    });
+    projects.sort_by(|left, right| {
+        right
+            .downloads
+            .cmp(&left.downloads)
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.project_id.cmp(&right.project_id))
+    });
+    Ok(HttpResponse::Ok().json(RegistryBrowseResponse {
+        projects,
+        warnings: Vec::new(),
+    }))
+}
+
+fn browse_mod_dto(project: PublishedMod) -> RegistryBrowseProject {
+    browse_project_dto(
+        RegistryProjectKind::Mod,
+        project.id,
+        project.title,
+        String::new(),
+        project.latest_version,
+        project.downloads,
+        project.repository_url,
+        project.repository_path,
+        project.source_commit,
+        project.source_tree_oid,
+        project.manifest_sha256,
+        project.readme_path.is_some(),
+        project.image_path.is_some(),
+    )
+}
+
+fn browse_modpack_dto(project: PublishedModpack) -> RegistryBrowseProject {
+    browse_project_dto(
+        RegistryProjectKind::Modpack,
+        project.id,
+        project.title,
+        project.description,
+        project.latest_version,
+        project.downloads,
+        project.repository_url,
+        project.repository_path,
+        project.source_commit,
+        project.source_tree_oid,
+        project.manifest_sha256,
+        project.readme_path.is_some(),
+        project.image_path.is_some(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn browse_project_dto(
+    project_kind: RegistryProjectKind,
+    project_id: String,
+    title: String,
+    description: String,
+    version: String,
+    downloads: i64,
+    repository_url: String,
+    repository_path: String,
+    source_commit: String,
+    source_tree_oid: String,
+    manifest_sha256: String,
+    has_readme: bool,
+    has_image: bool,
+) -> RegistryBrowseProject {
+    let route = format!(
+        "/registry/projects/{}/{project_id}",
+        project_kind.route_segment()
+    );
+    let source_label = Url::parse(&repository_url)
+        .ok()
+        .and_then(|url| {
+            let mut segments = url.path_segments()?;
+            Some(format!("{}/{}", segments.next()?, segments.next()?))
+        })
+        .unwrap_or_else(|| "Patchwork registry".to_owned());
+    RegistryBrowseProject {
+        project_kind,
+        project_id,
+        title,
+        description,
+        version,
+        downloads,
+        source: RegistryBrowseSource::Remote,
+        source_label,
+        repository_url: Some(repository_url),
+        repository_path: Some(repository_path),
+        source_commit: Some(source_commit),
+        source_tree_oid: Some(source_tree_oid),
+        manifest_sha256: Some(manifest_sha256),
+        manifest_url: Some(format!("{route}/manifest")),
+        readme_url: has_readme.then(|| format!("{route}/readme")),
+        image_url: has_image.then(|| format!("{route}/image")),
+        local_manifest_path: None,
+    }
+}
+
+struct PublishedSource {
+    repository_id: i64,
+    owner: String,
+    repository: String,
+    tree_oid: String,
+}
+
+async fn get_published_source(
+    state: web::Data<RegistryState>,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse> {
+    let (project_kind, project_id) = path.into_inner();
+    let source = published_source(&state.database, &project_kind, &project_id)?
+        .ok_or_else(|| error::ErrorNotFound("published source was not found"))?;
+    let (tree, access_token) = state
+        .github
+        .published_tree(
+            &source.owner,
+            &source.repository,
+            source.repository_id,
+            &source.tree_oid,
+        )
+        .await
+        .map_err(error::ErrorBadGateway)?;
+    if tree.sha != source.tree_oid {
+        return Err(error::ErrorBadGateway(
+            "GitHub returned a different source tree OID",
+        ));
+    }
+
+    if tree
+        .entries
+        .iter()
+        .any(|entry| !matches!(entry.kind.as_str(), "blob" | "tree") || entry.mode == "160000")
+    {
+        return Err(error::ErrorUnprocessableEntity(
+            "published source contains a Git submodule or unsupported tree entry",
+        ));
+    }
+    let mut entries = tree
+        .entries
+        .into_iter()
+        .filter(|entry| entry.kind == "blob")
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_PUBLISHED_SOURCE_FILES {
+        return Err(error::ErrorPayloadTooLarge(
+            "published source contains too many files",
+        ));
+    }
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let declared_size = entries
+        .iter()
+        .map(|entry| entry.size.unwrap_or(MAX_PUBLISHED_SOURCE_FILE_BYTES + 1))
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| error::ErrorPayloadTooLarge("published source is too large"))?;
+    if declared_size > MAX_PUBLISHED_SOURCE_BYTES {
+        return Err(error::ErrorPayloadTooLarge("published source is too large"));
+    }
+    if entries.iter().any(|entry| entry.mode == "120000") {
+        return Err(error::ErrorUnprocessableEntity(
+            "published source contains symbolic links, which are not supported",
+        ));
+    }
+    if entries.iter().any(|entry| !safe_archive_path(&entry.path)) {
+        return Err(error::ErrorInternalServerError(
+            "published source contains an unsafe path",
+        ));
+    }
+
+    let github = state.github.clone();
+    let owner = source.owner.clone();
+    let repository = source.repository.clone();
+    let mut downloads = stream::iter(entries.into_iter().map(|entry| {
+        let github = github.clone();
+        let owner = owner.clone();
+        let repository = repository.clone();
+        let access_token = access_token.clone();
+        async move {
+            let bytes = github
+                .published_blob_with_token(
+                    &owner,
+                    &repository,
+                    &access_token,
+                    &entry.sha,
+                    MAX_PUBLISHED_SOURCE_FILE_BYTES,
+                )
+                .await?;
+            Ok::<_, String>((entry, bytes))
+        }
+    }))
+    .buffer_unordered(GITHUB_BLOB_CONCURRENCY);
+    let mut files = Vec::new();
+    let mut actual_size = 0_u64;
+    while let Some(result) = downloads.next().await {
+        let (entry, bytes) = result.map_err(error::ErrorBadGateway)?;
+        actual_size = actual_size
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| error::ErrorPayloadTooLarge("published source is too large"))?;
+        if actual_size > MAX_PUBLISHED_SOURCE_BYTES {
+            return Err(error::ErrorPayloadTooLarge("published source is too large"));
+        }
+        files.push((entry, bytes));
+    }
+    files.sort_by(|left, right| left.0.path.cmp(&right.0.path));
+
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for (entry, bytes) in files {
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_path(&entry.path)
+            .map_err(error::ErrorInternalServerError)?;
+        header.set_size(bytes.len() as u64);
+        header.set_mode(if entry.mode == "100755" { 0o755 } else { 0o644 });
+        header.set_mtime(0);
+        header.set_cksum();
+        archive
+            .append(&header, Cursor::new(bytes))
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    let encoder = archive
+        .into_inner()
+        .map_err(error::ErrorInternalServerError)?;
+    let bytes = encoder.finish().map_err(error::ErrorInternalServerError)?;
+    increment_project_download(&state.database, &project_kind, &project_id)?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/gzip")
+        .insert_header((
+            "Content-Disposition",
+            format!("attachment; filename=\"{project_id}.tar.gz\""),
+        ))
+        .body(bytes))
+}
+
+fn safe_archive_path(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn published_source(
+    database: &Database,
+    project_kind: &str,
+    project_id: &str,
+) -> Result<Option<PublishedSource>> {
+    if project_kind != "mods" {
+        return Ok(None);
+    }
+    let Some(state) = database
+        .get_registry_mod_state(project_id)
+        .map_err(database_http_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(latest_id) = state.mod_record.latest_version_id.as_deref() else {
+        return Ok(None);
+    };
+    let version = state
+        .versions
+        .iter()
+        .find(|version| version.id == latest_id)
+        .ok_or_else(|| error::ErrorInternalServerError("latest mod version is missing"))?;
+    Ok(Some(PublishedSource {
+        repository_id: state.repository.provider_repository_id,
+        owner: state.repository.owner,
+        repository: state.repository.name,
+        tree_oid: version.source_tree_oid.clone(),
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum PublishedArtifactKind {
+    Manifest,
+    Readme,
+    Image,
+}
+
+struct PublishedArtifact {
+    repository_id: i64,
+    owner: String,
+    repository: String,
+    path: String,
+    blob_oid: String,
+}
+
+async fn get_published_artifact(
+    state: web::Data<RegistryState>,
+    path: web::Path<(String, String, String)>,
+) -> Result<HttpResponse> {
+    let (project_kind, project_id, artifact) = path.into_inner();
+    let artifact_kind = match artifact.as_str() {
+        "manifest" => PublishedArtifactKind::Manifest,
+        "readme" => PublishedArtifactKind::Readme,
+        "image" => PublishedArtifactKind::Image,
+        _ => return Err(error::ErrorNotFound("published artifact not found")),
+    };
+    let artifact = published_artifact(&state.database, &project_kind, &project_id, artifact_kind)?
+        .ok_or_else(|| error::ErrorNotFound("published artifact not found"))?;
+    let maximum_size = match artifact_kind {
+        PublishedArtifactKind::Manifest => MAX_PUBLISHED_MANIFEST_BYTES,
+        PublishedArtifactKind::Readme => MAX_PUBLISHED_README_BYTES,
+        PublishedArtifactKind::Image => MAX_PUBLISHED_IMAGE_BYTES,
+    };
+    let bytes = state
+        .github
+        .published_blob(
+            &artifact.owner,
+            &artifact.repository,
+            artifact.repository_id,
+            &artifact.blob_oid,
+            maximum_size,
+        )
+        .await
+        .map_err(error::ErrorBadGateway)?;
+    if matches!(artifact_kind, PublishedArtifactKind::Manifest) {
+        increment_project_download(&state.database, &project_kind, &project_id)?;
+    }
+    let filename = Path::new(&artifact.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        })
+        .unwrap_or("artifact")
+        .to_owned();
+    Ok(HttpResponse::Ok()
+        .content_type(artifact_content_type(artifact_kind, &artifact.path))
+        .insert_header(("X-Patchwork-Filename", filename))
+        .body(bytes))
+}
+
+fn increment_project_download(
+    database: &Database,
+    project_kind: &str,
+    project_id: &str,
+) -> Result<i64> {
+    match project_kind {
+        "mods" => database
+            .increment_mod_downloads(project_id)
+            .map_err(database_http_error),
+        "modpacks" => database
+            .increment_modpack_downloads(project_id)
+            .map_err(database_http_error),
+        _ => Err(error::ErrorNotFound("published project was not found")),
+    }
+}
+
+fn published_artifact(
+    database: &Database,
+    project_kind: &str,
+    project_id: &str,
+    artifact_kind: PublishedArtifactKind,
+) -> Result<Option<PublishedArtifact>> {
+    if project_kind == "mods" {
+        let Some(state) = database
+            .get_registry_mod_state(project_id)
+            .map_err(database_http_error)?
+        else {
+            return Ok(None);
+        };
+        let Some(latest_id) = state.mod_record.latest_version_id.as_deref() else {
+            return Ok(None);
+        };
+        let version = state
+            .versions
+            .iter()
+            .find(|version| version.id == latest_id)
+            .ok_or_else(|| error::ErrorInternalServerError("latest mod version is missing"))?;
+        let coordinate = match artifact_kind {
+            PublishedArtifactKind::Manifest => Some((
+                version.manifest_path.clone(),
+                version.manifest_blob_oid.clone(),
+            )),
+            PublishedArtifactKind::Readme => version
+                .readme_path
+                .clone()
+                .zip(version.readme_blob_oid.clone()),
+            PublishedArtifactKind::Image => version
+                .image_path
+                .clone()
+                .zip(version.image_blob_oid.clone()),
+        };
+        return Ok(coordinate.map(|(path, blob_oid)| PublishedArtifact {
+            repository_id: state.repository.provider_repository_id,
+            owner: state.repository.owner,
+            repository: state.repository.name,
+            path,
+            blob_oid,
+        }));
+    }
+    if project_kind == "modpacks" {
+        let Some(state) = database
+            .get_registry_modpack_state(project_id)
+            .map_err(database_http_error)?
+        else {
+            return Ok(None);
+        };
+        let Some(latest_id) = state.modpack_record.latest_version_id.as_deref() else {
+            return Ok(None);
+        };
+        let version = state
+            .versions
+            .iter()
+            .find(|version| version.id == latest_id)
+            .ok_or_else(|| error::ErrorInternalServerError("latest modpack version is missing"))?;
+        let coordinate = match artifact_kind {
+            PublishedArtifactKind::Manifest => Some((
+                version.manifest_path.clone(),
+                version.manifest_blob_oid.clone(),
+            )),
+            PublishedArtifactKind::Readme => version
+                .readme_path
+                .clone()
+                .zip(version.readme_blob_oid.clone()),
+            PublishedArtifactKind::Image => version
+                .image_path
+                .clone()
+                .zip(version.image_blob_oid.clone()),
+        };
+        return Ok(coordinate.map(|(path, blob_oid)| PublishedArtifact {
+            repository_id: state.repository.provider_repository_id,
+            owner: state.repository.owner,
+            repository: state.repository.name,
+            path,
+            blob_oid,
+        }));
+    }
+    Ok(None)
+}
+
+fn artifact_content_type(kind: PublishedArtifactKind, path: &str) -> &'static str {
+    match kind {
+        PublishedArtifactKind::Manifest => "application/toml; charset=utf-8",
+        PublishedArtifactKind::Readme => "text/markdown; charset=utf-8",
+        PublishedArtifactKind::Image => match Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("webp") => "image/webp",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            _ => "image/png",
+        },
+    }
 }
 
 async fn create_scan(
@@ -312,6 +833,277 @@ fn rescan_input(
     })
 }
 
+async fn get_project_details(
+    state: web::Data<RegistryState>,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse> {
+    let (project_kind, project_id) = path.into_inner();
+    if project_kind == "mods" && is_generated_mod_id(&project_id) {
+        return Err(error::ErrorNotFound("published project was not found"));
+    }
+    let details = match project_kind.as_str() {
+        "mods" => mod_details(&state.database, &project_id)?,
+        "modpacks" => modpack_details(&state.database, &project_id)?,
+        _ => None,
+    }
+    .ok_or_else(|| error::ErrorNotFound("published project was not found"))?;
+    Ok(HttpResponse::Ok().json(details))
+}
+
+fn mod_details(database: &Database, project_id: &str) -> Result<Option<RegistryProjectDetails>> {
+    let Some(state) = database
+        .get_registry_mod_state(project_id)
+        .map_err(database_http_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(latest_id) = state.mod_record.latest_version_id.as_deref() else {
+        return Ok(None);
+    };
+    let version = state
+        .versions
+        .iter()
+        .find(|version| version.id == latest_id)
+        .ok_or_else(|| error::ErrorInternalServerError("latest mod version is missing"))?;
+    let publisher = published_project_account(database, &state.mod_record.publisher_uuid)?;
+    let mut dependencies = database
+        .list_mod_version_dependencies(&version.id)
+        .map_err(database_http_error)?
+        .into_iter()
+        .map(|dependency| {
+            registry_dependency(
+                database,
+                &dependency.relation_kind,
+                &dependency.target_kind,
+                dependency.target_id,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let metadata = serde_json::from_str::<patchwork::ModInfo>(&version.metadata_json)
+        .map_err(|_| error::ErrorInternalServerError("stored mod metadata is invalid"))?;
+    if let Some(provided_api) = metadata.provides {
+        dependencies.push(registry_dependency(
+            database,
+            "provides",
+            "mod",
+            provided_api,
+        )?);
+    }
+    let route = format!("/registry/projects/mods/{}", state.mod_record.id);
+    Ok(Some(RegistryProjectDetails {
+        project_kind: RegistryProjectKind::Mod,
+        project_id: state.mod_record.id,
+        title: version.title.clone(),
+        description: String::new(),
+        version: version.version.clone(),
+        downloads: Some(state.mod_record.downloads),
+        publisher_uuid: publisher.uuid,
+        publisher_name: publisher.nickname,
+        published_at: version
+            .published_at
+            .and_utc()
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        repository_url: state.repository.canonical_url,
+        repository_path: version.repository_path.clone(),
+        source_commit: version.source_commit.clone(),
+        source_tree_oid: version.source_tree_oid.clone(),
+        manifest_sha256: version.manifest_sha256.clone(),
+        manifest_url: format!("{route}/manifest"),
+        source_url: Some(format!("{route}/source")),
+        readme_url: version
+            .readme_path
+            .as_ref()
+            .map(|_| format!("{route}/readme")),
+        image_url: version
+            .image_path
+            .as_ref()
+            .map(|_| format!("{route}/image")),
+        dependencies,
+    }))
+}
+
+fn modpack_details(
+    database: &Database,
+    project_id: &str,
+) -> Result<Option<RegistryProjectDetails>> {
+    let Some(state) = database
+        .get_registry_modpack_state(project_id)
+        .map_err(database_http_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(latest_id) = state.modpack_record.latest_version_id.as_deref() else {
+        return Ok(None);
+    };
+    let version = state
+        .versions
+        .iter()
+        .find(|version| version.id == latest_id)
+        .ok_or_else(|| error::ErrorInternalServerError("latest modpack version is missing"))?;
+    let publisher = published_project_account(database, &state.modpack_record.publisher_uuid)?;
+    let dependencies = database
+        .list_modpack_version_dependencies(&version.id)
+        .map_err(database_http_error)?
+        .into_iter()
+        .map(|dependency| {
+            registry_dependency(
+                database,
+                &dependency.relation_kind,
+                &dependency.target_kind,
+                dependency.target_id,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let route = format!("/registry/projects/modpacks/{}", state.modpack_record.id);
+    Ok(Some(RegistryProjectDetails {
+        project_kind: RegistryProjectKind::Modpack,
+        project_id: state.modpack_record.id,
+        title: version.title.clone(),
+        description: version.description.clone(),
+        version: version.version.clone(),
+        downloads: Some(state.modpack_record.downloads),
+        publisher_uuid: publisher.uuid,
+        publisher_name: publisher.nickname,
+        published_at: version
+            .published_at
+            .and_utc()
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        repository_url: state.repository.canonical_url,
+        repository_path: version.repository_path.clone(),
+        source_commit: version.source_commit.clone(),
+        source_tree_oid: version.source_tree_oid.clone(),
+        manifest_sha256: version.manifest_sha256.clone(),
+        manifest_url: format!("{route}/manifest"),
+        source_url: None,
+        readme_url: version
+            .readme_path
+            .as_ref()
+            .map(|_| format!("{route}/readme")),
+        image_url: version
+            .image_path
+            .as_ref()
+            .map(|_| format!("{route}/image")),
+        dependencies,
+    }))
+}
+
+fn published_project_account(database: &Database, publisher_uuid: &str) -> Result<Account> {
+    let publisher_uuid = Uuid::parse_str(publisher_uuid)
+        .map_err(|_| error::ErrorInternalServerError("stored publisher UUID is invalid"))?;
+    database
+        .get_account(publisher_uuid)
+        .map_err(database_http_error)?
+        .ok_or_else(|| error::ErrorInternalServerError("project publisher is missing"))
+}
+
+fn registry_dependency(
+    database: &Database,
+    relation_kind: &str,
+    target_kind: &str,
+    target_id: String,
+) -> Result<RegistryDependency> {
+    let kind = match relation_kind {
+        "init" => RegistryDependencyKind::Init,
+        "run" => RegistryDependencyKind::Run,
+        "ownership" => RegistryDependencyKind::Ownership,
+        "provides" => RegistryDependencyKind::Provides,
+        "mod" => RegistryDependencyKind::Mod,
+        "modpack" => RegistryDependencyKind::Modpack,
+        "ignore" => RegistryDependencyKind::Ignore,
+        _ => {
+            return Err(error::ErrorInternalServerError(
+                "invalid stored dependency kind",
+            ));
+        }
+    };
+    let target_kind = match target_kind {
+        "mod" => RegistryProjectKind::Mod,
+        "modpack" => RegistryProjectKind::Modpack,
+        _ => {
+            return Err(error::ErrorInternalServerError(
+                "invalid stored project kind",
+            ));
+        }
+    };
+    let available = match target_kind {
+        RegistryProjectKind::Mod if is_generated_mod_id(&target_id) => false,
+        RegistryProjectKind::Mod => database
+            .get_mod(&target_id)
+            .map_err(database_http_error)?
+            .is_some(),
+        RegistryProjectKind::Modpack => database
+            .get_modpack(&target_id)
+            .map_err(database_http_error)?
+            .is_some(),
+    };
+    Ok(RegistryDependency {
+        kind,
+        target_kind,
+        target_id,
+        available,
+    })
+}
+
+async fn rescan_project(
+    state: web::Data<RegistryState>,
+    request: HttpRequest,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse> {
+    let account = require_account(&state.database, &request)?;
+    let (project_kind, project_id) = path.into_inner();
+    let input = project_rescan_input(&state.database, &account, &project_kind, &project_id)?;
+    let scan = scan_repository(&state, &account, input, None).await?;
+    Ok(HttpResponse::Created().json(scan))
+}
+
+async fn start_project_rescan_job(
+    state: web::Data<RegistryState>,
+    request: HttpRequest,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse> {
+    let account = require_account(&state.database, &request)?;
+    let publisher_uuid = account_uuid(&account)?;
+    let (project_kind, project_id) = path.into_inner();
+    let input = project_rescan_input(&state.database, &account, &project_kind, &project_id)?;
+    let (reporter, started) = state.start_job(publisher_uuid);
+    let task_state = state.get_ref().clone();
+    actix_web::rt::spawn(async move {
+        match scan_repository(&task_state, &account, input, Some(&reporter)).await {
+            Ok(scan) => reporter.complete(scan),
+            Err(scan_error) => reporter.fail(scan_error.to_string()),
+        }
+    });
+    Ok(HttpResponse::Accepted().json(started))
+}
+
+fn project_rescan_input(
+    database: &Database,
+    account: &Account,
+    project_kind: &str,
+    project_id: &str,
+) -> Result<RegistryScanRequest> {
+    if project_kind == "mods" {
+        return rescan_input(database, account, project_id);
+    }
+    if project_kind != "modpacks" {
+        return Err(error::ErrorBadRequest(
+            "project_kind must be mods or modpacks",
+        ));
+    }
+    let publisher_uuid = account_uuid(account)?;
+    let current = database
+        .get_registry_modpack_state(project_id)
+        .map_err(database_http_error)?
+        .ok_or_else(|| error::ErrorNotFound("modpack was not found"))?;
+    if current.modpack_record.publisher_uuid != publisher_uuid.hyphenated().to_string() {
+        return Err(error::ErrorNotFound("modpack was not found"));
+    }
+    Ok(RegistryScanRequest {
+        repository_url: current.repository.canonical_url,
+        base_path: current.modpack_record.source_base_path,
+    })
+}
+
 async fn scan_repository(
     state: &RegistryState,
     account: &Account,
@@ -371,14 +1163,14 @@ async fn scan_repository(
     scan_warnings.extend(indexed.warnings);
     if candidates.is_empty() {
         scan_warnings.push(format!(
-            "No Patchwork mods were found below {}.",
+            "No Patchwork mods or modpacks were found below {}.",
             display_path(&base_path)
         ));
     }
 
     report_phase(
         reporter,
-        RegistryScanPhase::ValidatingMods,
+        RegistryScanPhase::ValidatingProjects,
         0,
         Some(candidates.len()),
     );
@@ -498,7 +1290,7 @@ fn normalize_base_path(value: &str) -> Result<String> {
     }
     if value.starts_with('/') || value.len() > 1024 || value.chars().any(char::is_control) {
         return Err(error::ErrorBadRequest(
-            "subdirectory must be a relative repository path of at most 1024 bytes",
+            "base path must be a relative repository path of at most 1024 bytes",
         ));
     }
     let mut parts = Vec::new();
@@ -506,7 +1298,7 @@ fn normalize_base_path(value: &str) -> Result<String> {
         match part {
             "" | "." => {}
             ".." => {
-                return Err(error::ErrorBadRequest("subdirectory must not contain '..'"));
+                return Err(error::ErrorBadRequest("base path must not contain '..'"));
             }
             _ => parts.push(part),
         }
@@ -515,7 +1307,7 @@ fn normalize_base_path(value: &str) -> Result<String> {
         Ok(".".to_owned())
     } else if parts.len() > MAX_DIRECTORY_DEPTH {
         Err(error::ErrorBadRequest(format!(
-            "subdirectory must contain at most {MAX_DIRECTORY_DEPTH} path components"
+            "base path must contain at most {MAX_DIRECTORY_DEPTH} path components"
         )))
     } else {
         Ok(parts.join("/"))
@@ -541,6 +1333,13 @@ struct ManifestReference {
     blob_oid: String,
     size: Option<u64>,
     scan_candidate: bool,
+    kind: ManifestKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ManifestKind {
+    Cargo,
+    Modpack,
 }
 
 async fn index_repository(
@@ -555,18 +1354,60 @@ async fn index_repository(
     let mut current_tree = github.tree(repository, commit_tree_oid).await?;
 
     if base_path != "." {
-        for component in base_path.split('/') {
+        let components = base_path.split('/').collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
             remember_manifest(&mut manifest_map, &current_path, &current_tree, false);
             let child = current_tree
                 .entries
                 .iter()
-                .find(|entry| entry.path == component && entry.kind == "tree")
+                .find(|entry| entry.path == *component)
                 .ok_or_else(|| {
                     format!(
-                        "subdirectory '{}' does not exist at commit {}",
+                        "path '{}' does not exist at commit {}",
                         base_path, commit_tree_oid
                     )
                 })?;
+            let is_last = index + 1 == components.len();
+            if is_last
+                && child.kind == "blob"
+                && is_regular_blob(&child.mode)
+                && component.to_ascii_lowercase().ends_with(".toml")
+                && *component != "Cargo.toml"
+            {
+                let directory = DirectorySnapshot {
+                    tree_oid: current_tree.sha.clone(),
+                    blobs: current_tree
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.kind == "blob" && is_regular_blob(&entry.mode))
+                        .cloned()
+                        .collect(),
+                };
+                manifest_map.insert(
+                    base_path.to_owned(),
+                    ManifestReference {
+                        path: base_path.to_owned(),
+                        blob_oid: child.sha.clone(),
+                        size: child.size,
+                        scan_candidate: true,
+                        kind: ManifestKind::Modpack,
+                    },
+                );
+                let base_tree_oid = current_tree.sha.clone();
+                report_phase(reporter, RegistryScanPhase::IndexingRepository, 1, Some(1));
+                return Ok(IndexedRepository {
+                    base_tree_oid,
+                    directories: BTreeMap::from([(current_path, directory)]),
+                    manifests: manifest_map.into_values().collect(),
+                    warnings: Vec::new(),
+                });
+            }
+            if child.kind != "tree" {
+                return Err(format!(
+                    "path '{}' is not a directory or a loose modpack TOML",
+                    base_path
+                ));
+            }
             current_path = join_repo_path(&current_path, component);
             current_tree = github.tree(repository, &child.sha).await?;
         }
@@ -640,8 +1481,13 @@ async fn index_repository(
         local_entry.path = file_name.clone();
         directory.blobs.push(local_entry);
 
-        if file_name == "Cargo.toml" {
-            let path = join_repo_path(&directory_path, "Cargo.toml");
+        if file_name.to_ascii_lowercase().ends_with(".toml") {
+            let kind = if file_name == "Cargo.toml" {
+                ManifestKind::Cargo
+            } else {
+                ManifestKind::Modpack
+            };
+            let path = join_repo_path(&directory_path, &file_name);
             manifest_map.insert(
                 path.clone(),
                 ManifestReference {
@@ -649,6 +1495,7 @@ async fn index_repository(
                     blob_oid: entry.sha,
                     size: entry.size,
                     scan_candidate: true,
+                    kind,
                 },
             );
         }
@@ -667,7 +1514,7 @@ async fn index_repository(
         .count();
     if scan_manifests > MAX_MANIFESTS {
         return Err(format!(
-            "scan found {scan_manifests} Cargo.toml files; the limit is {MAX_MANIFESTS}"
+            "scan found {scan_manifests} candidate manifests; the limit is {MAX_MANIFESTS}"
         ));
     }
 
@@ -699,6 +1546,7 @@ fn remember_manifest(
             blob_oid: entry.sha.clone(),
             size: entry.size,
             scan_candidate,
+            kind: ManifestKind::Cargo,
         });
 }
 
@@ -740,6 +1588,7 @@ async fn fetch_manifests(
                 blob_oid: reference.blob_oid,
                 source,
                 scan_candidate: reference.scan_candidate,
+                kind: reference.kind,
             })
         })
         .buffer_unordered(GITHUB_BLOB_CONCURRENCY);
@@ -762,12 +1611,15 @@ struct ManifestSource {
     blob_oid: String,
     source: String,
     scan_candidate: bool,
+    kind: ManifestKind,
 }
 
 struct Candidate {
     entry_id: Uuid,
-    mod_id: String,
+    project_kind: RegistryProjectKind,
+    project_id: String,
     title: String,
+    description: String,
     version: String,
     repository_path: String,
     source_tree_oid: String,
@@ -789,8 +1641,10 @@ impl Candidate {
     fn to_dto(&self) -> RegistryScanEntry {
         RegistryScanEntry {
             entry_id: self.entry_id.hyphenated().to_string(),
-            mod_id: self.mod_id.clone(),
+            project_kind: self.project_kind,
+            project_id: self.project_id.clone(),
             title: self.title.clone(),
+            description: self.description.clone(),
             version: self.version.clone(),
             repository_path: self.repository_path.clone(),
             manifest_path: self.manifest_path.clone(),
@@ -811,9 +1665,11 @@ impl Candidate {
     fn into_database_entry(self) -> Result<CreateRegistryScanEntry> {
         Ok(CreateRegistryScanEntry {
             id: self.entry_id,
-            mod_id: self.mod_id,
+            project_kind: project_kind_to_database(self.project_kind).to_owned(),
+            project_id: self.project_id,
             version: self.version,
             title: self.title,
+            description: self.description,
             repository_path: self.repository_path,
             source_tree_oid: self.source_tree_oid,
             manifest_path: self.manifest_path,
@@ -839,6 +1695,7 @@ fn parse_candidates(
 ) -> (Vec<Candidate>, Vec<String>, Vec<String>) {
     let workspace_manifests = manifests
         .iter()
+        .filter(|manifest| manifest.kind == ManifestKind::Cargo)
         .map(|manifest| RegistryWorkspaceManifest {
             path: Path::new(&manifest.path),
             source: &manifest.source,
@@ -850,6 +1707,61 @@ fn parse_candidates(
 
     for manifest in manifests.iter().filter(|manifest| manifest.scan_candidate) {
         let path = Path::new(&manifest.path);
+        if manifest.kind == ManifestKind::Modpack {
+            match parse_registry_modpack_manifest(&manifest.source, path) {
+                Ok(Some(parsed)) => push_modpack_candidate(
+                    &mut candidates,
+                    &mut warnings,
+                    manifest,
+                    parsed,
+                    directories,
+                ),
+                Ok(None) => {}
+                Err(parse_error) => {
+                    if let Some(identity) = fallback_modpack_identity(manifest) {
+                        let directory_path = repository_parent(&manifest.path);
+                        if let Some(directory) = directories.get(&directory_path) {
+                            let (readme_path, readme_blob_oid) = find_modpack_readme(
+                                &directory_path,
+                                directory,
+                                &identity.project_id,
+                            );
+                            let (image_path, image_blob_oid) =
+                                find_image(&directory_path, directory, &identity.project_id);
+                            candidates.push(Candidate {
+                                entry_id: Uuid::new_v4(),
+                                project_kind: RegistryProjectKind::Modpack,
+                                project_id: identity.project_id,
+                                title: identity.title,
+                                description: String::new(),
+                                version: identity.version,
+                                repository_path: directory_path,
+                                source_tree_oid: directory.tree_oid.clone(),
+                                manifest_path: manifest.path.clone(),
+                                manifest_blob_oid: manifest.blob_oid.clone(),
+                                manifest_sha256: sha256_hex(manifest.source.as_bytes()),
+                                readme_path,
+                                readme_blob_oid,
+                                image_path,
+                                image_blob_oid,
+                                status: RegistryScanStatus::Error,
+                                metadata: json!({}),
+                                dependencies: Vec::new(),
+                                warnings: Vec::new(),
+                                errors: vec![parse_error.to_string()],
+                            });
+                        }
+                    } else {
+                        warnings.push(format!(
+                            "Could not inspect {} as a Patchwork modpack: {}",
+                            manifest.path, parse_error
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+
         match parse_registry_mod_manifest(&manifest.source, path, &workspace_manifests) {
             Ok(Some(parsed)) => {
                 let directory_path = repository_parent(&manifest.path);
@@ -867,8 +1779,10 @@ fn parse_candidates(
                 let metadata = serde_json::to_value(&parsed.mod_info).unwrap_or_else(|_| json!({}));
                 candidates.push(Candidate {
                     entry_id: Uuid::new_v4(),
-                    mod_id: parsed.id,
+                    project_kind: RegistryProjectKind::Mod,
+                    project_id: parsed.id,
                     title: parsed.title,
+                    description: String::new(),
                     version: parsed.version,
                     repository_path: directory_path,
                     source_tree_oid: directory.tree_oid.clone(),
@@ -897,8 +1811,10 @@ fn parse_candidates(
                             find_image(&directory_path, directory, &identity.mod_id);
                         candidates.push(Candidate {
                             entry_id: Uuid::new_v4(),
-                            mod_id: identity.mod_id,
+                            project_kind: RegistryProjectKind::Mod,
+                            project_id: identity.mod_id,
                             title: identity.title,
+                            description: String::new(),
                             version: identity.version,
                             repository_path: directory_path,
                             source_tree_oid: directory.tree_oid.clone(),
@@ -933,11 +1849,72 @@ fn parse_candidates(
 
     if base_path != "." && !manifests.iter().any(|manifest| manifest.scan_candidate) {
         warnings.push(format!(
-            "No Cargo.toml files were found below {}.",
+            "No candidate manifests were found below {}.",
             display_path(base_path)
         ));
     }
     (candidates, warnings, errors)
+}
+
+fn push_modpack_candidate(
+    candidates: &mut Vec<Candidate>,
+    warnings: &mut Vec<String>,
+    manifest: &ManifestSource,
+    parsed: RegistryModpackManifest,
+    directories: &BTreeMap<String, DirectorySnapshot>,
+) {
+    let directory_path = repository_parent(&manifest.path);
+    let Some(directory) = directories.get(&directory_path) else {
+        warnings.push(format!(
+            "Could not identify the Git tree for {}.",
+            manifest.path
+        ));
+        return;
+    };
+    let (readme_path, readme_blob_oid) =
+        find_modpack_readme(&directory_path, directory, &parsed.id);
+    let (image_path, image_blob_oid) = find_image(&directory_path, directory, &parsed.id);
+    let dependencies = parsed
+        .dependencies
+        .iter()
+        .map(|dependency| RegistryDependency {
+            kind: if dependency.ignored {
+                RegistryDependencyKind::Ignore
+            } else {
+                match dependency.target_kind {
+                    RegistryDependencyTargetKind::Mod => RegistryDependencyKind::Mod,
+                    RegistryDependencyTargetKind::Modpack => RegistryDependencyKind::Modpack,
+                }
+            },
+            target_kind: registry_project_kind(dependency.target_kind),
+            target_id: dependency.target_id.clone(),
+            available: false,
+        })
+        .collect();
+    let description = parsed.modpack.description.clone();
+    let metadata = serde_json::to_value(&parsed.modpack).unwrap_or_else(|_| json!({}));
+    candidates.push(Candidate {
+        entry_id: Uuid::new_v4(),
+        project_kind: RegistryProjectKind::Modpack,
+        project_id: parsed.id,
+        title: parsed.title,
+        description,
+        version: parsed.version,
+        repository_path: directory_path,
+        source_tree_oid: directory.tree_oid.clone(),
+        manifest_path: manifest.path.clone(),
+        manifest_blob_oid: manifest.blob_oid.clone(),
+        manifest_sha256: sha256_hex(manifest.source.as_bytes()),
+        readme_path,
+        readme_blob_oid,
+        image_path,
+        image_blob_oid,
+        status: RegistryScanStatus::NewMod,
+        metadata,
+        dependencies,
+        warnings: Vec::new(),
+        errors: Vec::new(),
+    });
 }
 
 fn declares_patchwork_mod(source: &str) -> bool {
@@ -957,6 +1934,46 @@ struct FallbackIdentity {
     mod_id: String,
     title: String,
     version: String,
+}
+
+struct FallbackModpackIdentity {
+    project_id: String,
+    title: String,
+    version: String,
+}
+
+fn fallback_modpack_identity(manifest: &ManifestSource) -> Option<FallbackModpackIdentity> {
+    let project_id = Path::new(&manifest.path).file_stem()?.to_str()?.to_owned();
+    if !valid_mod_id(&project_id) {
+        return None;
+    }
+    let document = toml::from_str::<toml::Value>(&manifest.source).ok()?;
+    let table = document.as_table()?;
+    if !["modpacks", "mods", "ignore"]
+        .iter()
+        .any(|key| table.contains_key(*key))
+    {
+        return None;
+    }
+    let title = table
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&project_id)
+        .to_owned();
+    let version = table
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|version| Version::parse(version).is_ok())
+        .unwrap_or("0.0.0")
+        .to_owned();
+    Some(FallbackModpackIdentity {
+        project_id,
+        title,
+        version,
+    })
 }
 
 fn fallback_identity(
@@ -1049,14 +2066,33 @@ fn dependencies_from_mod_info(info: &patchwork::ModInfo) -> Vec<RegistryDependen
         ),
     ] {
         for target_id in targets {
+            let (target_kind, target_id) =
+                parse_registry_dependency(target_id, Path::new("Cargo.toml"))
+                    .expect("core registry validation already checked this dependency");
             dependencies.push(RegistryDependency {
                 kind,
-                target_id: target_id.clone(),
+                target_kind: registry_project_kind(target_kind),
+                target_id,
                 available: false,
             });
         }
     }
+    if let Some(target_id) = &info.provides {
+        dependencies.push(RegistryDependency {
+            kind: RegistryDependencyKind::Provides,
+            target_kind: RegistryProjectKind::Mod,
+            target_id: target_id.clone(),
+            available: false,
+        });
+    }
     dependencies
+}
+
+fn registry_project_kind(kind: RegistryDependencyTargetKind) -> RegistryProjectKind {
+    match kind {
+        RegistryDependencyTargetKind::Mod => RegistryProjectKind::Mod,
+        RegistryDependencyTargetKind::Modpack => RegistryProjectKind::Modpack,
+    }
 }
 
 fn find_readme(
@@ -1077,6 +2113,26 @@ fn find_readme(
         }
     }
     (None, None)
+}
+
+fn find_modpack_readme(
+    directory_path: &str,
+    directory: &DirectorySnapshot,
+    modpack_id: &str,
+) -> (Option<String>, Option<String>) {
+    let expected = format!("{modpack_id}.md");
+    directory
+        .blobs
+        .iter()
+        .filter(|entry| entry.path.eq_ignore_ascii_case(&expected))
+        .min_by(|left, right| left.path.cmp(&right.path))
+        .map(|entry| {
+            (
+                Some(join_repo_path(directory_path, &entry.path)),
+                Some(entry.sha.clone()),
+            )
+        })
+        .unwrap_or((None, None))
 }
 
 fn find_image(
@@ -1108,16 +2164,33 @@ fn validate_candidates(
     candidates: &mut [Candidate],
     reporter: Option<&ScanReporter>,
 ) -> Result<()> {
-    let mut counts = HashMap::<String, usize>::new();
+    let mut counts = HashMap::<(RegistryProjectKind, String), usize>::new();
     for candidate in candidates.iter() {
-        *counts.entry(candidate.mod_id.clone()).or_default() += 1;
+        *counts
+            .entry((candidate.project_kind, candidate.project_id.clone()))
+            .or_default() += 1;
     }
     for candidate in candidates.iter_mut() {
-        if counts.get(&candidate.mod_id).copied().unwrap_or_default() > 1 {
+        if candidate.project_kind == RegistryProjectKind::Mod
+            && is_generated_mod_id(&candidate.project_id)
+        {
             candidate.status = RegistryScanStatus::Error;
             candidate.errors.push(format!(
-                "Mod ID '{}' appears more than once in this scan.",
-                candidate.mod_id
+                "Mod ID '{}' is reserved for build-generated crates and cannot be published.",
+                candidate.project_id
+            ));
+        }
+        if counts
+            .get(&(candidate.project_kind, candidate.project_id.clone()))
+            .copied()
+            .unwrap_or_default()
+            > 1
+        {
+            candidate.status = RegistryScanStatus::Error;
+            candidate.errors.push(format!(
+                "{} ID '{}' appears more than once in this scan.",
+                project_kind_label(candidate.project_kind),
+                candidate.project_id
             ));
         }
     }
@@ -1125,22 +2198,28 @@ fn validate_candidates(
     let locally_available = candidates
         .iter()
         .filter(|candidate| candidate.errors.is_empty())
-        .map(|candidate| candidate.mod_id.clone())
+        .map(|candidate| (candidate.project_kind, candidate.project_id.clone()))
         .collect::<HashSet<_>>();
     let dependency_ids = candidates
         .iter()
         .flat_map(|candidate| candidate.dependencies.iter())
-        .map(|dependency| dependency.target_id.clone())
+        .map(|dependency| (dependency.target_kind, dependency.target_id.clone()))
+        .filter(|(kind, id)| *kind != RegistryProjectKind::Mod || !is_generated_mod_id(id))
         .collect::<HashSet<_>>();
     let mut registry_available = HashSet::new();
-    for dependency_id in dependency_ids {
-        if locally_available.contains(&dependency_id)
-            || database
-                .get_mod(&dependency_id)
+    for dependency in dependency_ids {
+        let exists = match dependency.0 {
+            RegistryProjectKind::Mod => database
+                .get_mod(&dependency.1)
                 .map_err(database_http_error)?
-                .is_some()
-        {
-            registry_available.insert(dependency_id);
+                .is_some(),
+            RegistryProjectKind::Modpack => database
+                .get_modpack(&dependency.1)
+                .map_err(database_http_error)?
+                .is_some(),
+        };
+        if locally_available.contains(&dependency) || exists {
+            registry_available.insert(dependency);
         }
     }
 
@@ -1148,7 +2227,18 @@ fn validate_candidates(
     let total = candidates.len();
     for (index, candidate) in candidates.iter_mut().enumerate() {
         for dependency in &mut candidate.dependencies {
-            dependency.available = registry_available.contains(&dependency.target_id);
+            if dependency.kind == RegistryDependencyKind::Ignore {
+                dependency.available = true;
+                continue;
+            }
+            if dependency.target_kind == RegistryProjectKind::Mod
+                && is_generated_mod_id(&dependency.target_id)
+            {
+                dependency.available = false;
+                continue;
+            }
+            dependency.available = registry_available
+                .contains(&(dependency.target_kind, dependency.target_id.clone()));
             if !dependency.available {
                 candidate.warnings.push(format!(
                     "Dependency '{}' ({}) is not currently published in this scan or registry.",
@@ -1165,15 +2255,30 @@ fn validate_candidates(
             continue;
         }
 
-        let existing = database
-            .get_registry_mod_state(&candidate.mod_id)
-            .map_err(database_http_error)?;
-        candidate.status = classify_candidate(
-            existing.as_ref(),
-            &publisher,
-            github_repository_id,
-            candidate,
-        );
+        candidate.status = match candidate.project_kind {
+            RegistryProjectKind::Mod => {
+                let existing = database
+                    .get_registry_mod_state(&candidate.project_id)
+                    .map_err(database_http_error)?;
+                classify_mod_candidate(
+                    existing.as_ref(),
+                    &publisher,
+                    github_repository_id,
+                    candidate,
+                )
+            }
+            RegistryProjectKind::Modpack => {
+                let existing = database
+                    .get_registry_modpack_state(&candidate.project_id)
+                    .map_err(database_http_error)?;
+                classify_modpack_candidate(
+                    existing.as_ref(),
+                    &publisher,
+                    github_repository_id,
+                    candidate,
+                )
+            }
+        };
         if let Some(reporter) = reporter {
             reporter.entry(candidate.to_dto(), index + 1, total);
         }
@@ -1181,7 +2286,7 @@ fn validate_candidates(
     Ok(())
 }
 
-fn classify_candidate(
+fn classify_mod_candidate(
     existing: Option<&RegistryModState>,
     publisher_uuid: &str,
     github_repository_id: i64,
@@ -1196,7 +2301,7 @@ fn classify_candidate(
     {
         candidate.errors.push(format!(
             "Mod ID '{}' already belongs to another publisher or GitHub repository.",
-            candidate.mod_id
+            candidate.project_id
         ));
         return RegistryScanStatus::Error;
     }
@@ -1212,8 +2317,52 @@ fn classify_candidate(
     } else {
         candidate.errors.push(format!(
             "{} {} is already published with different content. Increase package.version in Cargo.toml (for example {} -> {}).",
-            candidate.mod_id,
+            candidate.project_id,
             candidate.version,
+            candidate.version,
+            suggested_patch_version(&candidate.version)
+        ));
+        RegistryScanStatus::VersionConflict
+    }
+}
+
+fn classify_modpack_candidate(
+    existing: Option<&RegistryModpackState>,
+    publisher_uuid: &str,
+    github_repository_id: i64,
+    candidate: &mut Candidate,
+) -> RegistryScanStatus {
+    let Some(existing) = existing else {
+        return RegistryScanStatus::NewMod;
+    };
+    if existing.modpack_record.publisher_uuid != publisher_uuid
+        || existing.repository.provider != "github"
+        || existing.repository.provider_repository_id != github_repository_id
+    {
+        candidate.errors.push(format!(
+            "Modpack ID '{}' already belongs to another publisher or GitHub repository.",
+            candidate.project_id
+        ));
+        return RegistryScanStatus::Error;
+    }
+    let Some(version) = existing
+        .versions
+        .iter()
+        .find(|version| version.version == candidate.version)
+    else {
+        return RegistryScanStatus::NewVersion;
+    };
+    if version.manifest_blob_oid == candidate.manifest_blob_oid
+        && version.readme_blob_oid == candidate.readme_blob_oid
+        && version.image_blob_oid == candidate.image_blob_oid
+    {
+        RegistryScanStatus::Unchanged
+    } else {
+        candidate.errors.push(format!(
+            "{} {} is already published with different content. Increase version in {} (for example {} -> {}).",
+            candidate.project_id,
+            candidate.version,
+            candidate.manifest_path,
             candidate.version,
             suggested_patch_version(&candidate.version)
         ));
@@ -1237,6 +2386,34 @@ fn dependency_kind_label(kind: RegistryDependencyKind) -> &'static str {
         RegistryDependencyKind::Init => "init",
         RegistryDependencyKind::Run => "run",
         RegistryDependencyKind::Ownership => "ownership",
+        RegistryDependencyKind::Provides => "provides",
+        RegistryDependencyKind::Mod => "mod",
+        RegistryDependencyKind::Modpack => "modpack",
+        RegistryDependencyKind::Ignore => "ignore",
+    }
+}
+
+fn project_kind_label(kind: RegistryProjectKind) -> &'static str {
+    match kind {
+        RegistryProjectKind::Mod => "Mod",
+        RegistryProjectKind::Modpack => "Modpack",
+    }
+}
+
+fn project_kind_to_database(kind: RegistryProjectKind) -> &'static str {
+    match kind {
+        RegistryProjectKind::Mod => "mod",
+        RegistryProjectKind::Modpack => "modpack",
+    }
+}
+
+fn project_kind_from_database(kind: &str) -> Result<RegistryProjectKind> {
+    match kind {
+        "mod" => Ok(RegistryProjectKind::Mod),
+        "modpack" => Ok(RegistryProjectKind::Modpack),
+        _ => Err(error::ErrorInternalServerError(
+            "database contains an invalid registry project kind",
+        )),
     }
 }
 
@@ -1271,8 +2448,10 @@ fn scan_dto(stored: RegistryScanWithEntries) -> Result<RegistryScan> {
         .map(|entry| {
             Ok(RegistryScanEntry {
                 entry_id: entry.id,
-                mod_id: entry.mod_id,
+                project_kind: project_kind_from_database(&entry.project_kind)?,
+                project_id: entry.project_id,
                 title: entry.title,
+                description: entry.description,
                 version: entry.version,
                 repository_path: entry.repository_path,
                 manifest_path: entry.manifest_path,
@@ -1327,7 +2506,9 @@ fn publish_dto(published: RegistryPublishResult) -> RegistryPublishResponse {
             .published
             .into_iter()
             .map(|version| RegistryPublishedVersion {
-                mod_id: version.mod_id,
+                project_kind: project_kind_from_database(&version.project_kind)
+                    .expect("database publish only returns valid project kinds"),
+                project_id: version.project_id,
                 version: version.version,
                 version_id: version.version_id,
             })
@@ -1435,9 +2616,13 @@ mod tests {
         assert_eq!(normalize_base_path("").unwrap(), ".");
         assert_eq!(
             normalize_base_path("/mods").unwrap_err().to_string(),
-            "subdirectory must be a relative repository path of at most 1024 bytes"
+            "base path must be a relative repository path of at most 1024 bytes"
         );
         assert_eq!(normalize_base_path("./mods/api/").unwrap(), "mods/api");
+        assert_eq!(
+            normalize_base_path("modpacks/client.toml").unwrap(),
+            "modpacks/client.toml"
+        );
         assert!(normalize_base_path("mods/../secret").is_err());
     }
 

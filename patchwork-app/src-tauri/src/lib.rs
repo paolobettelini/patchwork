@@ -1,11 +1,15 @@
 use base64::{Engine, engine::general_purpose};
+use patchwork_registry_types::{RegistryBrowseRequest, RegistryProjectKind, RegistryProjectRef};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     collections::HashMap,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -13,21 +17,23 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod assets;
 mod auth;
+mod installer;
 mod model;
 mod paths;
 mod registry;
 
 use assets::{
-    ICON_EXTENSIONS, copy_icon_to_profile, deterministic_color_for, fake_downloads_for,
-    icon_version_for, matching_icon_for_modpack_file, matching_icon_named, read_icon_data_url,
-    remove_existing_icons,
+    ICON_EXTENSIONS, copy_icon_to_profile, deterministic_color_for, icon_version_for,
+    matching_icon_for_modpack_file, matching_icon_named, read_icon_data_url, remove_existing_icons,
 };
 use model::{
     AUTH_FILE, AppState, CONFIG_DIR, DEFAULT_DESCRIPTION, DEFAULT_TERMINAL_COLS,
-    DEFAULT_TERMINAL_ROWS, LauncherDependencyPage, LauncherModpack, LauncherModpackToml,
-    LauncherSettings, MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml, PATCHWORK_CONSOLE_EVENT,
-    PatchworkConsoleChunk, PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus,
-    SETTINGS_FILE, SETTINGS_POINTER_FILE, SelectedIconFile, SettingsPointer,
+    DEFAULT_TERMINAL_ROWS, LauncherDependencyPage, LauncherInstallResult, LauncherModpack,
+    LauncherModpackToml, LauncherSettings, MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml,
+    PATCHWORK_AUTH_EVENT, PATCHWORK_CONSOLE_EVENT, PatchworkAuthEvent, PatchworkConsoleChunk,
+    PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus, RegistryDownloadEvent,
+    RegistryDownloadStatus, RegistryInstallReport, SETTINGS_FILE, SETTINGS_POINTER_FILE,
+    SelectedIconFile, SettingsPointer,
 };
 use paths::{
     default_patchwork_data_dir, display_path, distinct_dependency_count, expand_env_vars,
@@ -151,6 +157,79 @@ fn update_launcher_theme(
 }
 
 #[tauri::command]
+fn update_launcher_backend(
+    app: AppHandle,
+    state: State<AppState>,
+    backend: String,
+) -> Result<LauncherSettings, String> {
+    let backend = auth::normalize_server_url(&backend)?;
+    let updated_settings = {
+        let mut settings = state
+            .settings
+            .lock()
+            .map_err(|_| "launcher settings lock is poisoned".to_string())?;
+        settings.backend = backend.clone();
+        let settings_path = state
+            .settings_path
+            .lock()
+            .map_err(|_| "launcher settings path lock is poisoned".to_string())?
+            .clone();
+        save_settings(&settings_path, &settings).map_err(|error| error.to_string())?;
+        settings.clone()
+    };
+
+    let status = {
+        let mut auth = state
+            .auth
+            .lock()
+            .map_err(|_| "auth lock is poisoned".to_string())?;
+        if auth.server_url != backend {
+            auth.server_url = backend;
+            auth.access_token = None;
+            auth.profile = None;
+            auth::save_auth_state(&state.auth_path, &auth).map_err(|error| error.to_string())?;
+        }
+        auth.status()
+    };
+    let _ = app.emit(
+        PATCHWORK_AUTH_EVENT,
+        PatchworkAuthEvent {
+            status,
+            error: None,
+        },
+    );
+    Ok(updated_settings)
+}
+
+#[tauri::command]
+fn update_launcher_local_folders(
+    state: State<AppState>,
+    folders: Vec<String>,
+) -> Result<LauncherSettings, String> {
+    let mut normalized = Vec::new();
+    for folder in folders {
+        let folder = expand_env_vars(folder.trim());
+        if folder.is_empty() || normalized.contains(&folder) {
+            continue;
+        }
+        normalized.push(folder);
+    }
+
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_string())?;
+    settings.local_folders = normalized;
+    let settings_path = state
+        .settings_path
+        .lock()
+        .map_err(|_| "launcher settings path lock is poisoned".to_string())?
+        .clone();
+    save_settings(&settings_path, &settings).map_err(|error| error.to_string())?;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
 fn list_modpacks(state: State<AppState>) -> Result<Vec<LauncherModpack>, String> {
     let settings = state
         .settings
@@ -159,6 +238,125 @@ fn list_modpacks(state: State<AppState>) -> Result<Vec<LauncherModpack>, String>
         .clone();
     ensure_settings_dirs(&settings).map_err(|error| error.to_string())?;
     read_modpacks(&settings).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn registry_download_status(
+    state: State<'_, AppState>,
+) -> Result<Option<RegistryDownloadEvent>, String> {
+    state
+        .download_status
+        .lock()
+        .map_err(|_| "download status lock is poisoned".to_owned())
+        .map(|status| status.visible_event())
+}
+
+#[tauri::command]
+async fn refresh_profiles(state: State<'_, AppState>) -> Result<Vec<LauncherModpack>, String> {
+    if state.download_running.load(Ordering::Acquire) {
+        return Err("Wait for the current download before refreshing profiles".to_owned());
+    }
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_owned())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut profiles = read_modpacks(&settings).map_err(|error| error.to_string())?;
+        for profile in &mut profiles {
+            if let Ok((updates, _)) = installer::check_profile_updates(&settings, &profile.id) {
+                profile.updates_available = updates;
+            }
+        }
+        Ok(profiles)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn refresh_profile(
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<LauncherModpack, String> {
+    if state.download_running.load(Ordering::Acquire) {
+        return Err("Wait for the current download before refreshing the profile".to_owned());
+    }
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_owned())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+        let path = Path::new(&settings.profiles_dir).join(format!("{profile_id}.toml"));
+        let mut profile = read_modpack_file(&path, &settings).map_err(|error| error.to_string())?;
+        let (updates, errors) = installer::check_profile_updates(&settings, &profile_id)?;
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
+        }
+        profile.updates_available = updates;
+        Ok(profile)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_profile_updates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<LauncherInstallResult, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_owned())?
+        .clone();
+    let download_running = state.download_running.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+        let report = installer::install_profile_dependencies(
+            &app,
+            &settings,
+            &download_running,
+            &profile_id,
+            true,
+        )?;
+        let path = Path::new(&settings.profiles_dir).join(format!("{profile_id}.toml"));
+        let mut profile = read_modpack_file(&path, &settings).map_err(|error| error.to_string())?;
+        let (updates, _) = installer::check_profile_updates(&settings, &profile_id)?;
+        profile.updates_available = updates;
+        Ok(LauncherInstallResult { profile, report })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_profile_dependencies(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+) -> Result<RegistryInstallReport, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_owned())?
+        .clone();
+    let download_running = state.download_running.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile_id = sanitize_existing_modpack_id(&profile_id)?;
+        installer::install_profile_dependencies(
+            &app,
+            &settings,
+            &download_running,
+            &profile_id,
+            false,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -274,6 +472,7 @@ fn create_modpack(
         color: None,
         name: non_empty_or(&name, &id),
         description: non_empty_or(&description, DEFAULT_DESCRIPTION),
+        version: "0.1.0".to_owned(),
         modpacks: Vec::new(),
         ignore: Vec::new(),
         mods: Vec::new(),
@@ -364,12 +563,13 @@ fn delete_modpack(state: State<AppState>, modpack_id: String) -> Result<(), Stri
         )
     })?;
     remove_existing_icons(profiles_dir, &id).map_err(|error| error.to_string())?;
+    registry::remove_profile_origin(&settings, &id)?;
     Ok(())
 }
 
 #[tauri::command]
-fn load_dependency_page(
-    state: State<AppState>,
+async fn load_dependency_page(
+    state: State<'_, AppState>,
     kind: String,
     id: String,
 ) -> Result<LauncherDependencyPage, String> {
@@ -378,25 +578,35 @@ fn load_dependency_page(
         .lock()
         .map_err(|_| "launcher settings lock is poisoned".to_string())?
         .clone();
-    ensure_settings_dirs(&settings).map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_settings_dirs(&settings).map_err(|error| error.to_string())?;
 
-    let id = sanitize_existing_modpack_id(&id)?;
-    let kind = kind.trim();
-    let target = match kind {
-        "profile" => patchwork::DependencyTarget::Profile { id: &id },
-        "modpack" => patchwork::DependencyTarget::Modpack { id: &id },
-        "mod" => patchwork::DependencyTarget::Mod { id: &id },
-        _ => return Err(format!("Unknown dependency page kind '{kind}'")),
-    };
-    let page = patchwork::inspect_dependency_page(
-        target,
-        Path::new(&settings.mod_cache),
-        Path::new(&settings.modpacks_cache),
-        Path::new(&settings.profiles_dir),
-    )
-    .map_err(|error| error.to_string())?;
+        let id = sanitize_existing_modpack_id(&id)?;
+        let kind = kind.trim();
+        if kind == "mod" && patchwork_registry_types::is_generated_mod_id(&id) {
+            return Err(
+                "Generated mods are created during compose and do not have project pages"
+                    .to_owned(),
+            );
+        }
+        let target = match kind {
+            "profile" => patchwork::DependencyTarget::Profile { id: &id },
+            "modpack" => patchwork::DependencyTarget::Modpack { id: &id },
+            "mod" => patchwork::DependencyTarget::Mod { id: &id },
+            _ => return Err(format!("Unknown dependency page kind '{kind}'")),
+        };
+        let page = patchwork::inspect_dependency_page(
+            target,
+            Path::new(&settings.mod_cache),
+            Path::new(&settings.modpacks_cache),
+            Path::new(&settings.profiles_dir),
+        )
+        .map_err(|error| error.to_string())?;
 
-    decorate_dependency_page(page, &settings)
+        decorate_dependency_page(page, &settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -429,6 +639,7 @@ fn toggle_profile_ignore(
         color: None,
         name: profile_id.clone(),
         description: DEFAULT_DESCRIPTION.to_string(),
+        version: "0.1.0".to_owned(),
         modpacks: Vec::new(),
         ignore: Vec::new(),
         mods: Vec::new(),
@@ -601,7 +812,10 @@ fn start_patchwork_action(
 
     let profile_id = sanitize_existing_modpack_id(&profile_id)?;
     let action = action.trim();
-    if !matches!(action, "compose-build" | "compose" | "build" | "run") {
+    if !matches!(
+        action,
+        "download" | "compose-build" | "compose" | "build" | "run"
+    ) {
         return Err(format!("Unknown patchwork action '{action}'"));
     }
     let build_mode = sanitize_build_mode(&build_mode)?;
@@ -620,6 +834,7 @@ fn start_patchwork_action(
     }
 
     let tasks = state.tasks.clone();
+    let download_running = state.download_running.clone();
     {
         let mut tasks = tasks
             .lock()
@@ -684,6 +899,7 @@ fn start_patchwork_action(
             app.clone(),
             tasks.clone(),
             settings.clone(),
+            download_running,
             profile_id.clone(),
             profile_path,
             action.clone(),
@@ -858,12 +1074,19 @@ pub fn run() {
             let settings_path =
                 load_settings_pointer(&settings_pointer_path).unwrap_or(default_settings_path);
             let defaults = LauncherSettings::default_for(&patchwork_data_dir);
-            let settings = load_settings(&settings_path, &defaults)?;
+            let mut settings = load_settings(&settings_path, &defaults)?;
+            settings.backend = auth::normalize_server_url(&settings.backend)
+                .unwrap_or_else(|_| model::default_auth_server_url());
             ensure_settings_dirs(&settings)?;
             save_settings(&settings_path, &settings)?;
             save_settings_pointer(&settings_pointer_path, &settings_path)?;
             let auth_path = patchwork_config_dir.join(AUTH_FILE);
-            let auth = auth::load_auth_state(&auth_path)?;
+            let mut auth = auth::load_auth_state(&auth_path)?;
+            if auth.server_url != settings.backend {
+                auth.server_url = settings.backend.clone();
+                auth.access_token = None;
+                auth.profile = None;
+            }
             auth::save_auth_state(&auth_path, &auth)?;
             app.manage(AppState {
                 settings_pointer_path,
@@ -872,6 +1095,8 @@ pub fn run() {
                 auth_path,
                 auth: Mutex::new(auth),
                 tasks: Arc::new(Mutex::new(HashMap::new())),
+                download_running: Arc::new(AtomicBool::new(false)),
+                download_status: Mutex::new(RegistryDownloadStatus::default()),
             });
             Ok(())
         })
@@ -887,6 +1112,10 @@ pub fn run() {
             auth::logout_auth,
             auth::update_auth_nickname,
             registry::registry_create_scan,
+            registry::registry_browse,
+            registry::registry_project_details,
+            registry::registry_add_to_profile,
+            registry::registry_download_modpack_as_profile,
             registry::registry_start_scan,
             registry::registry_scan_progress,
             registry::registry_get_scan,
@@ -896,7 +1125,14 @@ pub fn run() {
             load_launcher_settings,
             update_launcher_path,
             update_launcher_theme,
+            update_launcher_backend,
+            update_launcher_local_folders,
             list_modpacks,
+            registry_download_status,
+            refresh_profiles,
+            refresh_profile,
+            download_profile_dependencies,
+            download_profile_updates,
             update_profile_metadata,
             create_modpack,
             import_modpack,
@@ -1044,13 +1280,14 @@ fn read_modpack_file(
         version: parsed.version.unwrap_or_else(|| "1.21.x".to_string()),
         mods: parsed.mods.len(),
         dependencies: dependency_count,
-        downloads: fake_downloads_for(&id),
+        downloads: "-".to_owned(),
         accent: parsed
             .color
             .filter(|color| is_valid_hex_color(color))
             .unwrap_or_else(|| deterministic_color_for(&id).to_string()),
         icon_data_url,
         icon_version,
+        updates_available: 0,
     })
 }
 
@@ -1058,6 +1295,7 @@ fn decorate_dependency_page(
     page: patchwork::DependencyPage,
     settings: &LauncherSettings,
 ) -> Result<LauncherDependencyPage, String> {
+    let (source_kind, registry_details) = dependency_page_source(&page, settings);
     let icon_path = match page.kind {
         patchwork::DependencyPageKind::Profile => matching_icon_for_modpack_file(
             &Path::new(&settings.profiles_dir).join(format!("{}.toml", page.id)),
@@ -1093,6 +1331,7 @@ fn decorate_dependency_page(
         id: page.id,
         name: page.name,
         description: page.description,
+        version: page.version,
         editable_profile: page.editable_profile,
         distinct_dependency_count: page.distinct_dependency_count,
         modpacks: page.modpacks,
@@ -1100,19 +1339,150 @@ fn decorate_dependency_page(
         diagnostics: page.diagnostics,
         icon_data_url,
         icon_version,
+        publisher_name: registry_details
+            .as_ref()
+            .map(|details| details.publisher_name.clone()),
+        published_at: registry_details
+            .as_ref()
+            .map(|details| details.published_at.clone()),
+        downloads: registry_details
+            .as_ref()
+            .and_then(|details| details.downloads),
+        repository_url: registry_details
+            .as_ref()
+            .map(|details| details.repository_url.clone()),
+        repository_path: registry_details
+            .as_ref()
+            .map(|details| details.repository_path.clone()),
+        source_commit: registry_details
+            .as_ref()
+            .map(|details| details.source_commit.clone()),
+        source_tree_oid: registry_details
+            .as_ref()
+            .map(|details| details.source_tree_oid.clone()),
+        manifest_sha256: registry_details
+            .as_ref()
+            .map(|details| details.manifest_sha256.clone()),
+        source_kind,
     })
+}
+
+fn dependency_page_source(
+    page: &patchwork::DependencyPage,
+    settings: &LauncherSettings,
+) -> (
+    String,
+    Option<patchwork_registry_types::RegistryProjectDetails>,
+) {
+    let project_kind = match page.kind {
+        patchwork::DependencyPageKind::Profile => RegistryProjectKind::Modpack,
+        patchwork::DependencyPageKind::Modpack => RegistryProjectKind::Modpack,
+        patchwork::DependencyPageKind::Mod => RegistryProjectKind::Mod,
+    };
+    let request = RegistryBrowseRequest {
+        query: page.id.clone(),
+        include_mods: project_kind == RegistryProjectKind::Mod,
+        include_modpacks: project_kind == RegistryProjectKind::Modpack,
+    };
+    let stored_origin = matches!(page.kind, patchwork::DependencyPageKind::Profile)
+        .then(|| registry::load_profile_origin(settings, &page.id))
+        .flatten();
+    if stored_origin.as_ref().is_some_and(|origin| {
+        origin.source == patchwork_registry_types::RegistryBrowseSource::Local
+    }) {
+        return ("local-registry".to_owned(), None);
+    }
+
+    let is_local = settings.local_folders.iter().any(|folder| {
+        registry::browse_local_folder(Path::new(folder), &request).is_ok_and(|projects| {
+            projects.into_iter().any(|project| {
+                project.project_kind == project_kind && project.project_id == page.id
+            })
+        })
+    });
+    if is_local {
+        return ("local-registry".to_owned(), None);
+    }
+
+    let details = registry::fetch_project_details(
+        &settings.backend,
+        RegistryProjectRef {
+            project_kind,
+            project_id: page.id.clone(),
+        },
+    )
+    .ok();
+    if details.is_some() {
+        ("remote-registry".to_owned(), details)
+    } else if matches!(page.kind, patchwork::DependencyPageKind::Profile) {
+        ("profile".to_owned(), None)
+    } else {
+        ("remote-registry".to_owned(), None)
+    }
 }
 
 fn run_patchwork_task(
     app: AppHandle,
     tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
     settings: LauncherSettings,
+    download_running: Arc<AtomicBool>,
     profile_id: String,
     profile_path: PathBuf,
     action: String,
     build_mode: String,
 ) {
-    if matches!(action.as_str(), "compose-build" | "compose") {
+    if action != "run" {
+        emit_console_line(
+            &app,
+            &tasks,
+            &profile_id,
+            &action,
+            "[download] Resolving profile dependencies...",
+        );
+        match installer::install_profile_dependencies(
+            &app,
+            &settings,
+            &download_running,
+            &profile_id,
+            false,
+        ) {
+            Ok(report) if report.errors.is_empty() => emit_console_line(
+                &app,
+                &tasks,
+                &profile_id,
+                &action,
+                &format!(
+                    "[download] Done: {} installed, {} already available.",
+                    report.installed, report.up_to_date
+                ),
+            ),
+            Ok(report) => {
+                let error = format!("Dependency download failed:\n{}", report.errors.join("\n"));
+                emit_console_line_with_error(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[download] Failed: {error}"),
+                    Some(error),
+                );
+                return;
+            }
+            Err(error) => {
+                emit_console_line_with_error(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[download] Failed: {error}"),
+                    Some(error),
+                );
+                return;
+            }
+        }
+    }
+
+    if matches!(action.as_str(), "compose-build" | "compose" | "build") {
         emit_console_line(
             &app,
             &tasks,
@@ -1638,6 +2008,7 @@ fn composed_package_name(project_dir: &Path) -> Option<String> {
 
 fn compose_action_title(action: &str) -> &'static str {
     match action {
+        "download" => "Download",
         "compose" => "Compose",
         "build" => "Build",
         "run" => "Run",

@@ -1,10 +1,13 @@
 use crate::model::{
-    DependencyPage, LauncherAuthStatus, LauncherModpack, LauncherSettings, PatchworkAuthEvent,
-    PatchworkConsoleEvent, PatchworkTaskStatus, SelectedIconFile,
+    DependencyPage, LauncherAuthStatus, LauncherInstallResult, LauncherModpack, LauncherSettings,
+    PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus, RegistryDownloadEvent,
+    RegistryInstallReport, SelectedIconFile,
 };
 use patchwork_registry_types::{
-    RegistryPublishRequest, RegistryPublishResponse, RegistryScan, RegistryScanJobStarted,
-    RegistryScanProgress, RegistryScanRequest,
+    RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
+    RegistryBrowseResponse, RegistryProjectDetails, RegistryProjectRef, RegistryPublishRequest,
+    RegistryPublishResponse, RegistryScan, RegistryScanJobStarted, RegistryScanProgress,
+    RegistryScanRequest,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use wasm_bindgen::{JsCast, prelude::*};
@@ -12,6 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 
 const PATCHWORK_CONSOLE_EVENT: &str = "patchwork-console";
 const PATCHWORK_AUTH_EVENT: &str = "patchwork-auth";
+const PATCHWORK_DOWNLOAD_EVENT: &str = "patchwork-download";
 
 pub(crate) async fn select_folder() -> Result<Option<String>, JsValue> {
     invoke("select_folder", &()).await
@@ -37,16 +41,8 @@ pub(crate) async fn refresh_auth_profile() -> Result<LauncherAuthStatus, JsValue
     invoke("refresh_auth_profile", &()).await
 }
 
-pub(crate) async fn start_oauth_login(
-    server_url: Option<&str>,
-) -> Result<LauncherAuthStatus, JsValue> {
-    #[derive(Serialize)]
-    struct Args<'a> {
-        #[serde(rename = "serverUrl")]
-        server_url: Option<&'a str>,
-    }
-
-    invoke("start_oauth_login", &Args { server_url }).await
+pub(crate) async fn start_oauth_login() -> Result<LauncherAuthStatus, JsValue> {
+    invoke("start_oauth_login", &()).await
 }
 
 pub(crate) async fn logout_auth() -> Result<LauncherAuthStatus, JsValue> {
@@ -79,6 +75,46 @@ pub(crate) async fn registry_start_scan(
     }
 
     invoke("registry_start_scan", &Args { input }).await
+}
+
+pub(crate) async fn registry_browse(
+    input: RegistryBrowseRequest,
+) -> Result<RegistryBrowseResponse, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        input: RegistryBrowseRequest,
+    }
+    invoke("registry_browse", &Args { input }).await
+}
+
+pub(crate) async fn registry_project_details(
+    project: RegistryProjectRef,
+) -> Result<RegistryProjectDetails, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        project: RegistryProjectRef,
+    }
+    invoke("registry_project_details", &Args { project }).await
+}
+
+pub(crate) async fn registry_add_to_profile(
+    input: RegistryAddToProfileRequest,
+) -> Result<LauncherInstallResult, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        input: RegistryAddToProfileRequest,
+    }
+    invoke("registry_add_to_profile", &Args { input }).await
+}
+
+pub(crate) async fn registry_download_modpack_as_profile(
+    project: RegistryBrowseProject,
+) -> Result<LauncherInstallResult, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        project: RegistryBrowseProject,
+    }
+    invoke("registry_download_modpack_as_profile", &Args { project }).await
 }
 
 pub(crate) async fn registry_scan_progress(job_id: &str) -> Result<RegistryScanProgress, JsValue> {
@@ -115,14 +151,15 @@ pub(crate) async fn registry_publish_scan(
     invoke("registry_publish_scan", &Args { scan_id, input }).await
 }
 
-pub(crate) async fn registry_start_rescan(mod_id: &str) -> Result<RegistryScanJobStarted, JsValue> {
+pub(crate) async fn registry_start_rescan(
+    project: &RegistryProjectRef,
+) -> Result<RegistryScanJobStarted, JsValue> {
     #[derive(Serialize)]
     struct Args<'a> {
-        #[serde(rename = "modId")]
-        mod_id: &'a str,
+        project: &'a RegistryProjectRef,
     }
 
-    invoke("registry_start_rescan", &Args { mod_id }).await
+    invoke("registry_start_rescan", &Args { project }).await
 }
 
 pub(crate) async fn update_launcher_path(
@@ -147,8 +184,70 @@ pub(crate) async fn update_launcher_theme(theme: &str) -> Result<LauncherSetting
     invoke("update_launcher_theme", &Args { theme }).await
 }
 
+pub(crate) async fn update_launcher_backend(backend: &str) -> Result<LauncherSettings, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        backend: &'a str,
+    }
+
+    invoke("update_launcher_backend", &Args { backend }).await
+}
+
+pub(crate) async fn update_launcher_local_folders(
+    folders: Vec<String>,
+) -> Result<LauncherSettings, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        folders: Vec<String>,
+    }
+
+    invoke("update_launcher_local_folders", &Args { folders }).await
+}
+
 pub(crate) async fn list_modpacks() -> Result<Vec<LauncherModpack>, JsValue> {
     invoke("list_modpacks", &()).await
+}
+
+pub(crate) async fn registry_download_status() -> Result<Option<RegistryDownloadEvent>, JsValue> {
+    invoke("registry_download_status", &()).await
+}
+
+pub(crate) async fn refresh_profiles() -> Result<Vec<LauncherModpack>, JsValue> {
+    invoke("refresh_profiles", &()).await
+}
+
+pub(crate) async fn refresh_profile(profile_id: &str) -> Result<LauncherModpack, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "profileId")]
+        profile_id: &'a str,
+    }
+
+    invoke("refresh_profile", &Args { profile_id }).await
+}
+
+pub(crate) async fn download_profile_updates(
+    profile_id: &str,
+) -> Result<LauncherInstallResult, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "profileId")]
+        profile_id: &'a str,
+    }
+
+    invoke("download_profile_updates", &Args { profile_id }).await
+}
+
+pub(crate) async fn download_profile_dependencies(
+    profile_id: &str,
+) -> Result<RegistryInstallReport, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "profileId")]
+        profile_id: &'a str,
+    }
+
+    invoke("download_profile_dependencies", &Args { profile_id }).await
 }
 
 pub(crate) async fn update_profile_metadata(
@@ -364,6 +463,34 @@ where
     let _ = listen.call2(
         &event_api,
         &JsValue::from_str(PATCHWORK_AUTH_EVENT),
+        closure.as_ref().unchecked_ref(),
+    )?;
+    closure.forget();
+    Ok(())
+}
+
+pub(crate) fn listen_registry_download<F>(mut callback: F) -> Result<(), JsValue>
+where
+    F: FnMut(RegistryDownloadEvent) + 'static,
+{
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is not available"))?;
+    let tauri = js_sys::Reflect::get(&window, &JsValue::from_str("__TAURI__"))?;
+    let event_api = js_sys::Reflect::get(&tauri, &JsValue::from_str("event"))?;
+    let listen = js_sys::Reflect::get(&event_api, &JsValue::from_str("listen"))?
+        .dyn_into::<js_sys::Function>()?;
+
+    let closure = Closure::wrap(Box::new(move |event: JsValue| {
+        let Ok(payload) = js_sys::Reflect::get(&event, &JsValue::from_str("payload")) else {
+            return;
+        };
+        if let Ok(event) = serde_wasm_bindgen::from_value::<RegistryDownloadEvent>(payload) {
+            callback(event);
+        }
+    }) as Box<dyn FnMut(JsValue)>);
+
+    let _ = listen.call2(
+        &event_api,
+        &JsValue::from_str(PATCHWORK_DOWNLOAD_EVENT),
         closure.as_ref().unchecked_ref(),
     )?;
     closure.forget();

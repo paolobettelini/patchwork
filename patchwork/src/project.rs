@@ -1,7 +1,7 @@
 use crate::codegen;
 use crate::error::{PatchworkError, Result};
 use crate::model::ModInfo;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -73,12 +73,14 @@ pub fn create_project(
         .collect::<Result<Vec<_>>>()?
         .join("\n");
 
+    let git_patches = generate_git_source_patches(mods_folder, &mods)?;
     let cargo_toml = CARGO_TOML_TEMPLATE
         .replace("#PLACEHOLDER", &dependencies)
         .replace(
             "name = \"template\"",
             &format!("name = \"{}\"", project_name),
-        );
+        )
+        + &git_patches;
 
     fs::write(project_dir.join("Cargo.toml"), cargo_toml).map_err(|source| {
         PatchworkError::io(
@@ -172,6 +174,78 @@ pub fn create_project(
     codegen::patch_generated_crates(&project_dir, &codegen_tasks)?;
 
     Ok(())
+}
+
+fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -> Result<String> {
+    let mut git_sources = BTreeSet::new();
+    for (mod_name, _) in mods {
+        let manifest_path = mods_folder.join(mod_name).join("Cargo.toml");
+        let source = fs::read_to_string(&manifest_path).map_err(|source| {
+            PatchworkError::io(
+                "read mod Cargo.toml for Git patches",
+                &manifest_path,
+                source,
+            )
+        })?;
+        let manifest = toml::from_str::<toml::Value>(&source).map_err(|source| {
+            PatchworkError::parse_toml("mod Cargo.toml", &manifest_path, source)
+        })?;
+        collect_git_sources(&manifest, &mut git_sources);
+    }
+
+    if git_sources.is_empty() {
+        return Ok(String::new());
+    }
+
+    let patch_lines = mods
+        .iter()
+        .map(|(mod_name, _)| {
+            let mod_path = mods_folder
+                .join(mod_name)
+                .canonicalize()
+                .map_err(|source| {
+                    PatchworkError::io(
+                        "canonicalize selected mod path for Git patches",
+                        mods_folder.join(mod_name),
+                        source,
+                    )
+                })?;
+            Ok(format!(
+                "{} = {{ path = {} }}",
+                toml_string(mod_name),
+                toml_string(&mod_path.to_string_lossy().replace('\\', "/"))
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join("\n");
+
+    Ok(git_sources
+        .into_iter()
+        .map(|source| format!("\n[patch.{}]\n{patch_lines}\n", toml_string(&source)))
+        .collect())
+}
+
+fn collect_git_sources(value: &toml::Value, sources: &mut BTreeSet<String>) {
+    match value {
+        toml::Value::Table(table) => {
+            if let Some(source) = table.get("git").and_then(toml::Value::as_str) {
+                sources.insert(source.to_owned());
+            }
+            for value in table.values() {
+                collect_git_sources(value, sources);
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                collect_git_sources(value, sources);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
 }
 
 fn copy_project_assets(

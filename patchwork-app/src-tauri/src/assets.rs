@@ -111,13 +111,6 @@ pub(crate) fn deterministic_color_for(id: &str) -> &'static str {
     COLOR_PALETTE[index]
 }
 
-pub(crate) fn fake_downloads_for(id: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    let value = 1.0 + (hasher.finish() % 24_900) as f32 / 1_000.0;
-    format!("{value:.1}K")
-}
-
 fn supported_icon_extension(path: &Path) -> Option<String> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     ICON_EXTENSIONS

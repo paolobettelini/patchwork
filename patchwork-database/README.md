@@ -46,35 +46,20 @@ query parameters.
   directory Git tree OID, manifest blob/SHA-256, optional README/image
   coordinates, metadata, and publishing identities.
 - `mod_version_dependencies` stores ordered `init`, `run`, and `ownership`
-  relations per version.
+  relations per version, with typed `mod` or `modpack` targets.
+- `modpacks` is the permanent modpack identity with publisher, repository,
+  Rescan base path, latest-version pointer, and downloads.
+- `modpack_versions` stores immutable semantic versions with exact Git
+  snapshot, manifest, README/image, metadata, and publisher coordinates.
+- `modpack_version_dependencies` stores ordered `mod`, `modpack`, and `ignore`
+  relations per immutable version with typed targets.
 - `registry_scans` and `registry_scan_entries` persist short-lived authoritative
   previews. Publish accepts entry UUIDs and reads all metadata from these rows.
 
-`UNIQUE(mod_id, version)` prevents an existing release from being replaced by
-different source, including under concurrent publish requests.
-
-### `modpacks`
-
-- Globally unique slug ID.
-- Title, description and publishing timestamp.
-- Download count, initialized to zero.
-- Publishing account UUID.
-- GitHub repository URL, TOML manifest path and immutable source ref.
-- Optional HTTPS logo URL.
-
-### `modpack_dependencies`
-
-The TOML arrays are normalized into rows:
-
-- `mods = [...]` becomes `relation_kind = "mod"`.
-- `modpacks = [...]` becomes `relation_kind = "modpack"`.
-- `ignore = [...]` becomes `relation_kind = "ignore"`.
-
-The table stores the original order in `position` and has an index on `(relation_kind, target_id)`, so reverse lookups such as “which modpacks use this mod?” are efficient.
-
-`mod` and `modpack` references must already exist. `ignore` references may point to an absent ID because they commonly suppress optional or transitive content.
-
-The database prevents direct self-dependencies, but dependency cycles involving two or more modpacks must be detected by the modpack resolver when it builds the dependency graph.
+`UNIQUE(mod_id, version)` and `UNIQUE(modpack_id, version)` prevent an existing
+release from being replaced by different source, including under concurrent
+publish requests. Missing dependency targets are retained as warnings and can
+be published later; graph resolution remains responsible for cycle detection.
 
 ## README handling
 
@@ -169,11 +154,9 @@ The library embeds migrations into the binary, so normal applications do not nee
 - `create_github_oauth_state`, `consume_github_oauth_state`
 - `get_github_account`, `get_github_account_by_user_id`
 - `link_github_account`, `unlink_github_account`
-- `publish_mod`, `get_mod`, `search_mods`, `list_mods_by_publisher`
-- `publish_modpack`, `get_modpack`, `replace_modpack_dependencies`
-- `search_modpacks`, `list_modpacks_by_publisher`
-- `find_modpacks_referencing`
-- `ModpackManifest::parse` and `ModpackManifest::dependencies`
+- `get_mod`, `get_registry_mod_state`, `search_mods`, `list_mods_by_publisher`
+- `get_modpack`, `get_registry_modpack_state`, `search_modpacks`, `list_modpacks_by_publisher`
+- `create_registry_scan`, `get_registry_scan`, `publish_registry_scan`
 
 All operations return `Result<T, DatabaseError>` rather than hiding failures behind `bool` or `Option`.
 

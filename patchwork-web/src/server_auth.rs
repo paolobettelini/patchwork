@@ -10,8 +10,8 @@ use argon2::{
 use base64::{Engine, engine::general_purpose};
 use chrono::{Duration, Utc};
 use patchwork_database::{
-    Account, CreatePendingRegistration, Database, Modpack, Pagination,
-    PendingRegistrationVerification, PublishedMod,
+    Account, CreatePendingRegistration, Database, Pagination, PendingRegistrationVerification,
+    PublishedMod, PublishedModpack,
 };
 use patchwork_web::auth_types::{
     AccountDto, LoginRequest, OAuthTokenRequest, OAuthTokenResponse, ProfileDto,
@@ -741,16 +741,16 @@ fn mod_to_dto(project: PublishedMod) -> PublishedProjectDto {
     }
 }
 
-fn modpack_to_dto(project: Modpack) -> PublishedProjectDto {
+fn modpack_to_dto(project: PublishedModpack) -> PublishedProjectDto {
     PublishedProjectDto {
         id: project.id,
         title: project.title,
         kind: "Modpack".to_owned(),
         downloads: project.downloads,
-        latest_version: Some(project.source_ref),
+        latest_version: Some(project.latest_version),
         repository_url: Some(project.repository_url),
-        repository_path: Some(project.manifest_path),
-        can_rescan: false,
+        repository_path: Some(project.repository_path),
+        can_rescan: true,
     }
 }
 

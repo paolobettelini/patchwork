@@ -31,6 +31,7 @@ pub struct DependencyPage {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub version: String,
     pub editable_profile: bool,
     pub distinct_dependency_count: usize,
     pub modpacks: Vec<DependencyEntry>,
@@ -141,6 +142,7 @@ fn inspect_modpack_page(
             &document.modpack.description,
             "No description provided yet.",
         ),
+        version: document.modpack.version.clone(),
         editable_profile,
         distinct_dependency_count,
         modpacks,
@@ -177,6 +179,7 @@ fn inspect_mod_page(
         id: id.to_string(),
         name: summary.name,
         description: format!("Patchwork mod crate '{}'.", id),
+        version: summary.version,
         editable_profile: false,
         distinct_dependency_count,
         modpacks,
@@ -410,6 +413,7 @@ fn mod_entry(id: &str, mods_folder: &Path, ignored: bool) -> DependencyEntry {
 
 struct ModSummary {
     name: String,
+    version: String,
     info: ModInfo,
 }
 
@@ -426,6 +430,10 @@ fn read_mod_summary(id: &str, mods_folder: &Path) -> Result<ModSummary> {
         .map_err(|source| PatchworkError::io("read mod Cargo.toml", &manifest_path, source))?;
     let manifest: CargoManifest = toml::from_str(&source)
         .map_err(|source| PatchworkError::parse_toml("mod Cargo.toml", &manifest_path, source))?;
+    let version = toml::from_str::<toml::Value>(&source)
+        .ok()
+        .and_then(|document| local_package_version(&document, &manifest_path))
+        .unwrap_or_else(|| "Unknown".to_owned());
     let info =
         manifest
             .package
@@ -438,8 +446,48 @@ fn read_mod_summary(id: &str, mods_folder: &Path) -> Result<ModSummary> {
     info.validate(id, &manifest_path)?;
     Ok(ModSummary {
         name: manifest.package.name,
+        version,
         info,
     })
+}
+
+fn local_package_version(document: &toml::Value, manifest_path: &Path) -> Option<String> {
+    let version = document.get("package")?.get("version")?;
+    if let Some(version) = version.as_str() {
+        return Some(version.to_owned());
+    }
+    if !version
+        .as_table()
+        .and_then(|version| version.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    for directory in manifest_path.parent()?.ancestors() {
+        let workspace_path = directory.join("Cargo.toml");
+        let workspace = if workspace_path == manifest_path {
+            document.clone()
+        } else {
+            let Ok(source) = fs::read_to_string(&workspace_path) else {
+                continue;
+            };
+            let Ok(workspace) = toml::from_str::<toml::Value>(&source) else {
+                continue;
+            };
+            workspace
+        };
+        if let Some(version) = workspace
+            .get("workspace")
+            .and_then(|workspace| workspace.get("package"))
+            .and_then(|package| package.get("version"))
+            .and_then(toml::Value::as_str)
+        {
+            return Some(version.to_owned());
+        }
+    }
+    None
 }
 
 fn provider_for_dependency(mods_folder: &Path, dependency: &str) -> Option<String> {

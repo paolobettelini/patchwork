@@ -8,12 +8,15 @@ use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use patchwork_registry_types::{
-    RegistryPublishRequest, RegistryPublishResponse, RegistryScan, RegistryScanJobStarted,
-    RegistryScanPhase, RegistryScanProgress, RegistryScanRequest,
+    RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
+    RegistryBrowseResponse, RegistryProfileOption, RegistryProjectDetails, RegistryProjectKind,
+    RegistryProjectRef, RegistryPublishRequest, RegistryPublishResponse, RegistryScan,
+    RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress, RegistryScanRequest,
+    is_generated_mod_id,
 };
 use patchwork_ui::{
     ArrowRightToBracketIcon, BrowsePage, GithubIcon, HomeIcon, ProfilePage, PublishedProject,
-    SearchIcon, THEMES, UploadIcon, UploadPage, UserIcon,
+    RegistryProjectPage, SearchIcon, THEMES, UploadIcon, UploadPage, UserIcon,
 };
 use sha2::{Digest, Sha256};
 
@@ -26,6 +29,7 @@ enum WebPage {
     Browse,
     Upload,
     Profile,
+    Project,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +61,51 @@ pub(crate) fn WebApp() -> impl IntoView {
     let (registry_error, set_registry_error) = signal(None::<String>);
     let (registry_notice, set_registry_notice) = signal(None::<String>);
     let (registry_rescan_pending, set_registry_rescan_pending) = signal(None::<String>);
+    let (browse_results, set_browse_results) = signal(Vec::<RegistryBrowseProject>::new());
+    let (browse_pending, set_browse_pending) = signal(false);
+    let (browse_error, set_browse_error) = signal(None::<String>);
+    let (browse_warnings, set_browse_warnings) = signal(Vec::<String>::new());
+    let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
+    let (project_pending, set_project_pending) = signal(false);
+    let (project_error, set_project_error) = signal(None::<String>);
+
+    let open_project = Callback::new(move |project: RegistryProjectRef| {
+        if project.project_kind == RegistryProjectKind::Mod
+            && is_generated_mod_id(&project.project_id)
+        {
+            return;
+        }
+        let preview = registry_scan.get_untracked().and_then(|scan| {
+            scan.entries
+                .iter()
+                .find(|entry| {
+                    entry.project_kind == project.project_kind
+                        && entry.project_id == project.project_id
+                })
+                .map(|entry| (scan.scan_id.clone(), entry.entry_id.clone()))
+        });
+        let mut path = project_path(&project);
+        if let Some((scan_id, entry_id)) = preview {
+            path.push_str(&format!("?scan={scan_id}&entry={entry_id}"));
+        }
+        navigate_to(&path);
+    });
+
+    let browse_search = Callback::new(move |input: RegistryBrowseRequest| {
+        set_browse_pending.set(true);
+        set_browse_error.set(None);
+        set_browse_warnings.set(Vec::new());
+        leptos::task::spawn_local(async move {
+            match fetch_registry_browse(&input).await {
+                Ok(response) => {
+                    set_browse_results.set(response.projects);
+                    set_browse_warnings.set(response.warnings);
+                }
+                Err(error) => set_browse_error.set(Some(error)),
+            }
+            set_browse_pending.set(false);
+        });
+    });
 
     let upload_sign_in = Callback::new(move |()| set_show_auth.set(true));
     let upload_connect_github = Callback::new(move |()| navigate_to("/github/connect"));
@@ -91,7 +140,7 @@ pub(crate) fn WebApp() -> impl IntoView {
             match publish_registry_scan(&scan_id, input).await {
                 Ok(published) => {
                     set_registry_notice.set(Some(format!(
-                        "Published {} mod version{}.",
+                        "Published {} project version{}.",
                         published.published.len(),
                         if published.published.len() == 1 {
                             ""
@@ -111,12 +160,12 @@ pub(crate) fn WebApp() -> impl IntoView {
             set_registry_pending.set(false);
         });
     });
-    let profile_rescan = Callback::new(move |mod_id: String| {
+    let profile_rescan = Callback::new(move |project: RegistryProjectRef| {
         set_registry_error.set(None);
         set_registry_progress.set(None);
-        set_registry_rescan_pending.set(Some(mod_id.clone()));
+        set_registry_rescan_pending.set(Some(project.project_id.clone()));
         leptos::task::spawn_local(async move {
-            match start_registry_rescan(&mod_id).await {
+            match start_registry_rescan(&project).await {
                 Ok(started) => navigate_to(&format!("/upload?job={}", started.job_id)),
                 Err(message) => set_registry_error.set(Some(message)),
             }
@@ -129,6 +178,10 @@ pub(crate) fn WebApp() -> impl IntoView {
             set_profile.set(Some(current_profile));
         }
     });
+
+    if page == WebPage::Browse {
+        browse_search.run(RegistryBrowseRequest::default());
+    }
 
     if page == WebPage::Upload {
         if let Some(scan_id) = query_parameter("scan") {
@@ -152,13 +205,45 @@ pub(crate) fn WebApp() -> impl IntoView {
         }
     }
 
+    if let Some(project) = current_project_ref() {
+        set_project_pending.set(true);
+        leptos::task::spawn_local(async move {
+            let result = match (query_parameter("scan"), query_parameter("entry")) {
+                (Some(scan_id), Some(entry_id)) => {
+                    fetch_scan_project_details(&scan_id, &entry_id).await
+                }
+                _ => fetch_registry_project(&project).await,
+            };
+            match result {
+                Ok(details) => set_project_details.set(Some(details)),
+                Err(message) => set_project_error.set(Some(message)),
+            }
+            set_project_pending.set(false);
+        });
+    }
+
     view! {
         <div class="app-shell" data-theme=move || active_theme.get()>
             <TopBar active_page=page profile set_profile set_show_auth active_theme set_active_theme />
             <main class="web-workspace">
                 {match page {
                     WebPage::Home => view! { <HomePage /> }.into_any(),
-                    WebPage::Browse => view! { <BrowsePage allow_downloads=false /> }.into_any(),
+                    WebPage::Browse => view! {
+                        <BrowsePage
+                            results=Signal::from(browse_results)
+                            profiles=Signal::derive(Vec::<RegistryProfileOption>::new)
+                            pending=Signal::from(browse_pending)
+                            action_pending=Signal::derive(|| None::<String>)
+                            error=Signal::from(browse_error)
+                            warnings=Signal::from(browse_warnings)
+                            notice=Signal::derive(|| None::<String>)
+                            allow_downloads=false
+                            on_search=browse_search
+                            on_open_project=open_project
+                            on_download_profile=Callback::new(|_: RegistryBrowseProject| {})
+                            on_add_to_profile=Callback::new(|_: RegistryAddToProfileRequest| {})
+                        />
+                    }.into_any(),
                     WebPage::Upload => view! {
                         <UploadPage
                             authenticated=Signal::derive(move || profile.get().is_some())
@@ -172,6 +257,7 @@ pub(crate) fn WebApp() -> impl IntoView {
                             on_connect_github=upload_connect_github
                             on_scan=upload_scan
                             on_publish=upload_publish
+                            on_open_project=open_project
                         />
                     }.into_any(),
                     WebPage::Profile => view! {
@@ -179,9 +265,18 @@ pub(crate) fn WebApp() -> impl IntoView {
                             profile
                             set_profile
                             set_show_auth
+                            on_open_project=open_project
                             on_rescan=profile_rescan
                             rescan_pending=Signal::from(registry_rescan_pending)
                             registry_error=Signal::from(registry_error)
+                        />
+                    }.into_any(),
+                    WebPage::Project => view! {
+                        <RegistryProjectPage
+                            details=Signal::from(project_details)
+                            pending=Signal::from(project_pending)
+                            error=Signal::from(project_error)
+                            on_open_dependency=open_project
                         />
                     }.into_any(),
                 }}
@@ -562,7 +657,8 @@ fn WebProfilePage(
     profile: ReadSignal<Option<ProfileDto>>,
     set_profile: WriteSignal<Option<ProfileDto>>,
     set_show_auth: WriteSignal<bool>,
-    on_rescan: Callback<String>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_rescan: Callback<RegistryProjectRef>,
     rescan_pending: Signal<Option<String>>,
     registry_error: Signal<Option<String>>,
 ) -> impl IntoView {
@@ -611,37 +707,38 @@ fn WebProfilePage(
                                 account_name=current_profile.account.nickname
                                 mods=published_projects(current_profile.mods)
                                 modpacks=published_projects(current_profile.modpacks)
+                                on_open_project
                                 on_rescan
                                 rescan_pending
                             >
                                 <GithubConnection profile set_profile />
-                            </ProfilePage>
-                            <div class="profile-local-actions">
-                                <Show
-                                    when=move || editing_nickname.get()
-                                    fallback=move || view! {
-                                        <button type="button" class="catalog-secondary-action" on:click=start_edit>
-                                            "Change username"
-                                        </button>
-                                    }
-                                >
-                                    <div class="nickname-editor">
-                                        <input
-                                            maxlength="16"
-                                            prop:value=move || nickname_draft.get()
-                                            on:input=move |event| set_nickname_draft.set(event_target_value(&event))
-                                        />
-                                        <button type="button" class="catalog-primary-action" on:click=save_nickname>"Save"</button>
-                                        <button type="button" class="catalog-secondary-action" on:click=move |_| set_editing_nickname.set(false)>"Cancel"</button>
-                                    </div>
+                                <div class="profile-local-actions">
+                                    <Show
+                                        when=move || editing_nickname.get()
+                                        fallback=move || view! {
+                                            <button type="button" class="catalog-secondary-action" on:click=start_edit>
+                                                "Change username"
+                                            </button>
+                                        }
+                                    >
+                                        <div class="nickname-editor">
+                                            <input
+                                                maxlength="16"
+                                                prop:value=move || nickname_draft.get()
+                                                on:input=move |event| set_nickname_draft.set(event_target_value(&event))
+                                            />
+                                            <button type="button" class="catalog-primary-action" on:click=save_nickname>"Save"</button>
+                                            <button type="button" class="catalog-secondary-action" on:click=move |_| set_editing_nickname.set(false)>"Cancel"</button>
+                                        </div>
+                                    </Show>
+                                    <button type="button" class="catalog-secondary-action" on:click=logout>
+                                        "Logout"
+                                    </button>
+                                </div>
+                                <Show when=move || nickname_error.get().is_some()>
+                                    <p class="auth-error">{move || nickname_error.get().unwrap_or_default()}</p>
                                 </Show>
-                                <button type="button" class="catalog-secondary-action" on:click=logout>
-                                    "Logout"
-                                </button>
-                            </div>
-                            <Show when=move || nickname_error.get().is_some()>
-                                <p class="auth-error">{move || nickname_error.get().unwrap_or_default()}</p>
-                            </Show>
+                            </ProfilePage>
                             <Show when=move || registry_error.get().is_some()>
                                 <p class="auth-error">{move || registry_error.get().unwrap_or_default()}</p>
                             </Show>
@@ -819,8 +916,38 @@ fn current_page() -> WebPage {
         "/browse" => WebPage::Browse,
         "/upload" => WebPage::Upload,
         "/profile" => WebPage::Profile,
+        _ if current_project_ref().is_some() => WebPage::Project,
         _ => WebPage::Home,
     }
+}
+
+fn current_project_ref() -> Option<RegistryProjectRef> {
+    let path = current_path();
+    let mut segments = path.trim_matches('/').split('/');
+    let project_kind = match segments.next()? {
+        "mods" => RegistryProjectKind::Mod,
+        "modpacks" => RegistryProjectKind::Modpack,
+        _ => return None,
+    };
+    let project_id = segments.next()?.trim();
+    if project_id.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    if project_kind == RegistryProjectKind::Mod && is_generated_mod_id(project_id) {
+        return None;
+    }
+    Some(RegistryProjectRef {
+        project_kind,
+        project_id: project_id.to_owned(),
+    })
+}
+
+fn project_path(project: &RegistryProjectRef) -> String {
+    format!(
+        "/{}/{}",
+        project.project_kind.route_segment(),
+        project.project_id
+    )
 }
 
 fn load_stored_theme() -> String {
@@ -912,6 +1039,76 @@ async fn fetch_profile() -> Result<ProfileDto, String> {
     response.json().await.map_err(|error| error.to_string())
 }
 
+async fn fetch_registry_browse(
+    input: &RegistryBrowseRequest,
+) -> Result<RegistryBrowseResponse, String> {
+    let query: String =
+        url::form_urlencoded::byte_serialize(input.query.trim().as_bytes()).collect();
+    let response = Request::get(&format!(
+        "/registry/search?q={query}&mods={}&modpacks={}",
+        input.include_mods, input.include_modpacks
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    parse_json_response(response, "registry search failed").await
+}
+
+async fn fetch_registry_project(
+    project: &RegistryProjectRef,
+) -> Result<RegistryProjectDetails, String> {
+    let response = Request::get(&format!(
+        "/registry/projects/{}/{}",
+        project.project_kind.route_segment(),
+        project.project_id
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    parse_json_response(response, "could not load registry project").await
+}
+
+async fn fetch_scan_project_details(
+    scan_id: &str,
+    entry_id: &str,
+) -> Result<RegistryProjectDetails, String> {
+    let scan = fetch_registry_scan(scan_id).await?;
+    let entry = scan
+        .entries
+        .into_iter()
+        .find(|entry| entry.entry_id == entry_id)
+        .ok_or_else(|| "scan entry was not found".to_owned())?;
+    let publisher = fetch_profile().await.ok().map(|profile| profile.account);
+    Ok(RegistryProjectDetails {
+        project_kind: entry.project_kind,
+        project_id: entry.project_id,
+        title: entry.title,
+        description: entry.description,
+        version: entry.version,
+        downloads: None,
+        publisher_uuid: publisher
+            .as_ref()
+            .map(|account| account.uuid.clone())
+            .unwrap_or_else(|| "-".to_owned()),
+        publisher_name: publisher
+            .map(|account| account.nickname)
+            .unwrap_or_else(|| "Current publisher".to_owned()),
+        published_at: scan
+            .published_at
+            .unwrap_or_else(|| "Pending publication".to_owned()),
+        repository_url: scan.repository.canonical_url,
+        repository_path: entry.repository_path,
+        source_commit: scan.resolved_commit,
+        source_tree_oid: entry.source_tree_oid,
+        manifest_sha256: entry.manifest_sha256,
+        manifest_url: String::new(),
+        source_url: None,
+        readme_url: None,
+        image_url: None,
+        dependencies: entry.dependencies,
+    })
+}
+
 async fn start_registry_scan(input: RegistryScanRequest) -> Result<RegistryScanJobStarted, String> {
     let response = Request::post("/registry/scan-jobs")
         .json(&input)
@@ -979,11 +1176,17 @@ async fn publish_registry_scan(
     parse_json_response(response, "registry publish failed").await
 }
 
-async fn start_registry_rescan(mod_id: &str) -> Result<RegistryScanJobStarted, String> {
-    let response = Request::post(&format!("/registry/mods/{mod_id}/rescan-job"))
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
+async fn start_registry_rescan(
+    project: &RegistryProjectRef,
+) -> Result<RegistryScanJobStarted, String> {
+    let response = Request::post(&format!(
+        "/registry/projects/{}/{}/rescan-job",
+        project.project_kind.route_segment(),
+        project.project_id
+    ))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
     parse_json_response(response, "could not start registry rescan").await
 }
 
@@ -1224,6 +1427,11 @@ fn published_projects(projects: Vec<PublishedProjectDto>) -> Vec<PublishedProjec
     projects
         .into_iter()
         .map(|project| PublishedProject {
+            project_kind: if project.kind.eq_ignore_ascii_case("modpack") {
+                RegistryProjectKind::Modpack
+            } else {
+                RegistryProjectKind::Mod
+            },
             id: project.id,
             title: project.title,
             kind: project.kind,

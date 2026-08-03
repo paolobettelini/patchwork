@@ -6,8 +6,9 @@ use uuid::Uuid;
 use crate::error::{DatabaseError, Result};
 use crate::schema::{
     accounts, app_tokens, github_accounts, github_oauth_states, mod_version_dependencies,
-    mod_versions, modpack_dependencies, modpacks, mods, oauth_authorization_codes,
-    pending_registrations, registry_scan_entries, registry_scans, repositories, web_sessions,
+    mod_versions, modpack_version_dependencies, modpack_versions, modpacks, mods,
+    oauth_authorization_codes, pending_registrations, registry_scan_entries, registry_scans,
+    repositories, web_sessions,
 };
 
 #[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
@@ -123,11 +124,12 @@ pub struct ModVersion {
     Debug, Clone, Queryable, Selectable, Identifiable, Associations, Serialize, Deserialize,
 )]
 #[diesel(table_name = mod_version_dependencies)]
-#[diesel(primary_key(version_id, relation_kind, target_id))]
+#[diesel(primary_key(version_id, relation_kind, target_kind, target_id))]
 #[diesel(belongs_to(ModVersion, foreign_key = version_id))]
 pub struct ModVersionDependency {
     pub version_id: String,
     pub relation_kind: String,
+    pub target_kind: String,
     pub target_id: String,
     pub position: i32,
 }
@@ -162,9 +164,11 @@ pub struct RegistryScan {
 pub struct RegistryScanEntry {
     pub id: String,
     pub scan_id: String,
-    pub mod_id: String,
+    pub project_kind: String,
+    pub project_id: String,
     pub version: String,
     pub title: String,
+    pub description: String,
     pub repository_path: String,
     pub source_tree_oid: String,
     pub manifest_path: String,
@@ -203,9 +207,11 @@ pub struct CreateRegistryScan {
 #[derive(Debug, Clone)]
 pub struct CreateRegistryScanEntry {
     pub id: Uuid,
-    pub mod_id: String,
+    pub project_kind: String,
+    pub project_id: String,
     pub version: String,
     pub title: String,
+    pub description: String,
     pub repository_path: String,
     pub source_tree_oid: String,
     pub manifest_path: String,
@@ -235,6 +241,13 @@ pub struct RegistryModState {
     pub versions: Vec<ModVersion>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RegistryModpackState {
+    pub modpack_record: Modpack,
+    pub repository: Repository,
+    pub versions: Vec<ModpackVersion>,
+}
+
 #[derive(Debug, Clone, Queryable)]
 pub struct PublishedMod {
     pub id: String,
@@ -244,11 +257,34 @@ pub struct PublishedMod {
     pub publisher_uuid: String,
     pub repository_url: String,
     pub repository_path: String,
+    pub source_commit: String,
+    pub source_tree_oid: String,
+    pub manifest_sha256: String,
+    pub readme_path: Option<String>,
+    pub image_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Queryable)]
+pub struct PublishedModpack {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub latest_version: String,
+    pub downloads: i64,
+    pub publisher_uuid: String,
+    pub repository_url: String,
+    pub repository_path: String,
+    pub source_commit: String,
+    pub source_tree_oid: String,
+    pub manifest_sha256: String,
+    pub readme_path: Option<String>,
+    pub image_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PublishedRegistryVersion {
-    pub mod_id: String,
+    pub project_kind: String,
+    pub project_id: String,
     pub version: String,
     pub version_id: String,
 }
@@ -267,74 +303,53 @@ pub struct RegistryPublishResult {
 #[diesel(belongs_to(Account, foreign_key = publisher_uuid))]
 pub struct Modpack {
     pub id: String,
-    pub title: String,
-    pub description: String,
-    pub published_at: NaiveDateTime,
-    pub downloads: i64,
     pub publisher_uuid: String,
-    pub repository_url: String,
-    pub manifest_path: String,
-    pub source_ref: String,
-    pub logo_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishModpack {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub publisher_uuid: Uuid,
-    pub repository_url: String,
-    /// Repository-relative path to the TOML manifest.
-    pub manifest_path: String,
-    /// Prefer an immutable Git commit SHA rather than a mutable branch name.
-    pub source_ref: String,
-    pub logo_url: Option<String>,
-    pub dependencies: Vec<DependencyInput>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DependencyKind {
-    Mod,
-    Modpack,
-    Ignore,
-}
-
-impl DependencyKind {
-    pub const fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Mod => "mod",
-            Self::Modpack => "modpack",
-            Self::Ignore => "ignore",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Result<Self> {
-        match value {
-            "mod" => Ok(Self::Mod),
-            "modpack" => Ok(Self::Modpack),
-            "ignore" => Ok(Self::Ignore),
-            other => Err(DatabaseError::InvalidDependencyKind(other.to_owned())),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DependencyInput {
-    pub kind: DependencyKind,
-    pub target_id: String,
+    pub repository_id: String,
+    pub source_base_path: String,
+    pub latest_version_id: Option<String>,
+    pub downloads: i64,
+    pub created_at: NaiveDateTime,
 }
 
 #[derive(
     Debug, Clone, Queryable, Selectable, Identifiable, Associations, Serialize, Deserialize,
 )]
-#[diesel(table_name = modpack_dependencies)]
-#[diesel(primary_key(modpack_id, relation_kind, target_id))]
+#[diesel(table_name = modpack_versions)]
+#[diesel(primary_key(id))]
 #[diesel(belongs_to(Modpack, foreign_key = modpack_id))]
-pub struct ModpackDependency {
+pub struct ModpackVersion {
+    pub id: String,
     pub modpack_id: String,
+    pub version: String,
+    pub title: String,
+    pub description: String,
+    pub repository_path: String,
+    pub source_commit: String,
+    pub source_tree_oid: String,
+    pub manifest_path: String,
+    pub manifest_blob_oid: String,
+    pub manifest_sha256: String,
+    pub readme_path: Option<String>,
+    pub readme_blob_oid: Option<String>,
+    pub image_path: Option<String>,
+    pub image_blob_oid: Option<String>,
+    pub metadata_json: String,
+    pub published_by: String,
+    pub published_github_user_id: i64,
+    pub published_at: NaiveDateTime,
+    pub yanked_at: Option<NaiveDateTime>,
+}
+
+#[derive(
+    Debug, Clone, Queryable, Selectable, Identifiable, Associations, Serialize, Deserialize,
+)]
+#[diesel(table_name = modpack_version_dependencies)]
+#[diesel(primary_key(version_id, relation_kind, target_kind, target_id))]
+#[diesel(belongs_to(ModpackVersion, foreign_key = version_id))]
+pub struct ModpackVersionDependency {
+    pub version_id: String,
     pub relation_kind: String,
+    pub target_kind: String,
     pub target_id: String,
     pub position: i32,
 }
@@ -412,18 +427,6 @@ pub struct GithubOAuthState {
     pub created_at: NaiveDateTime,
     pub expires_at: NaiveDateTime,
     pub used_at: Option<NaiveDateTime>,
-}
-
-impl ModpackDependency {
-    pub fn kind(&self) -> Result<DependencyKind> {
-        DependencyKind::from_db_str(&self.relation_kind)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModpackWithDependencies {
-    pub modpack: Modpack,
-    pub dependencies: Vec<ModpackDependency>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -528,6 +531,7 @@ pub(crate) struct NewModVersionRow<'a> {
 pub(crate) struct NewModVersionDependencyRow<'a> {
     pub version_id: &'a str,
     pub relation_kind: &'a str,
+    pub target_kind: &'a str,
     pub target_id: &'a str,
     pub position: i32,
 }
@@ -556,9 +560,11 @@ pub(crate) struct NewRegistryScanRow<'a> {
 pub(crate) struct NewRegistryScanEntryRow<'a> {
     pub id: &'a str,
     pub scan_id: &'a str,
-    pub mod_id: &'a str,
+    pub project_kind: &'a str,
+    pub project_id: &'a str,
     pub version: &'a str,
     pub title: &'a str,
+    pub description: &'a str,
     pub repository_path: &'a str,
     pub source_tree_oid: &'a str,
     pub manifest_path: &'a str,
@@ -579,21 +585,42 @@ pub(crate) struct NewRegistryScanEntryRow<'a> {
 #[diesel(table_name = modpacks)]
 pub(crate) struct NewModpackRow<'a> {
     pub id: &'a str,
-    pub title: &'a str,
-    pub description: &'a str,
-    pub downloads: i64,
     pub publisher_uuid: &'a str,
-    pub repository_url: &'a str,
-    pub manifest_path: &'a str,
-    pub source_ref: &'a str,
-    pub logo_url: Option<&'a str>,
+    pub repository_id: &'a str,
+    pub source_base_path: &'a str,
+    pub latest_version_id: Option<&'a str>,
+    pub downloads: i64,
 }
 
 #[derive(Debug, Insertable)]
-#[diesel(table_name = modpack_dependencies)]
-pub(crate) struct NewModpackDependencyRow<'a> {
+#[diesel(table_name = modpack_versions)]
+pub(crate) struct NewModpackVersionRow<'a> {
+    pub id: &'a str,
     pub modpack_id: &'a str,
+    pub version: &'a str,
+    pub title: &'a str,
+    pub description: &'a str,
+    pub repository_path: &'a str,
+    pub source_commit: &'a str,
+    pub source_tree_oid: &'a str,
+    pub manifest_path: &'a str,
+    pub manifest_blob_oid: &'a str,
+    pub manifest_sha256: &'a str,
+    pub readme_path: Option<&'a str>,
+    pub readme_blob_oid: Option<&'a str>,
+    pub image_path: Option<&'a str>,
+    pub image_blob_oid: Option<&'a str>,
+    pub metadata_json: &'a str,
+    pub published_by: &'a str,
+    pub published_github_user_id: i64,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = modpack_version_dependencies)]
+pub(crate) struct NewModpackVersionDependencyRow<'a> {
+    pub version_id: &'a str,
     pub relation_kind: &'a str,
+    pub target_kind: &'a str,
     pub target_id: &'a str,
     pub position: i32,
 }

@@ -4,7 +4,9 @@ use semver::Version;
 use toml::Value;
 
 use crate::error::{PatchworkError, Result};
-use crate::model::ModInfo;
+use crate::model::{ModInfo, Modpack};
+
+const MODPACK_PREFIX: &str = "modpack/";
 
 #[derive(Clone, Copy)]
 pub struct RegistryWorkspaceManifest<'a> {
@@ -18,6 +20,28 @@ pub struct RegistryModManifest {
     pub title: String,
     pub version: String,
     pub mod_info: ModInfo,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RegistryDependencyTargetKind {
+    Mod,
+    Modpack,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistryModpackDependency {
+    pub target_kind: RegistryDependencyTargetKind,
+    pub target_id: String,
+    pub ignored: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistryModpackManifest {
+    pub id: String,
+    pub title: String,
+    pub version: String,
+    pub modpack: Modpack,
+    pub dependencies: Vec<RegistryModpackDependency>,
 }
 
 pub fn parse_registry_mod_manifest(
@@ -89,8 +113,9 @@ pub fn parse_registry_mod_manifest(
         .chain(&mod_info.dependencies.run)
         .chain(&mod_info.dependencies.ownership)
     {
-        validate_registry_id(dependency, manifest_path)?;
-        if dependency == &id {
+        let (dependency_kind, dependency_id) =
+            parse_registry_dependency(dependency, manifest_path)?;
+        if dependency_kind == RegistryDependencyTargetKind::Mod && dependency_id == id {
             return Err(invalid_metadata(
                 manifest_path,
                 &id,
@@ -109,6 +134,145 @@ pub fn parse_registry_mod_manifest(
         version,
         mod_info,
     }))
+}
+
+pub fn parse_registry_modpack_manifest(
+    source: &str,
+    manifest_path: &Path,
+) -> Result<Option<RegistryModpackManifest>> {
+    if manifest_path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml") {
+        return Ok(None);
+    }
+    let document = toml::from_str::<Value>(source)
+        .map_err(|source| PatchworkError::parse_toml("modpack", manifest_path, source))?;
+    let Some(table) = document.as_table() else {
+        return Ok(None);
+    };
+    let looks_like_modpack = ["modpacks", "mods", "ignore"]
+        .iter()
+        .any(|key| table.contains_key(*key));
+    if !looks_like_modpack {
+        return Ok(None);
+    }
+
+    let id = manifest_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            invalid_modpack_metadata(manifest_path, "<unknown>", "filename must be valid UTF-8")
+        })?
+        .to_owned();
+    validate_registry_id(&id, manifest_path).map_err(|_| {
+        invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            "filename must be a lowercase Patchwork ID",
+        )
+    })?;
+    let modpack = document.clone().try_into::<Modpack>().map_err(|error| {
+        invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            format!("cannot parse metadata: {error}"),
+        )
+    })?;
+    let version = modpack.version.trim().to_owned();
+    Version::parse(&version).map_err(|error| {
+        invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            format!("version is not valid semantic versioning: {error}"),
+        )
+    })?;
+    let title = if modpack.name.trim().is_empty() {
+        id.clone()
+    } else {
+        modpack.name.trim().to_owned()
+    };
+    if title.chars().count() > 200 || title.chars().any(char::is_control) {
+        return Err(invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            "name must contain at most 200 non-control characters",
+        ));
+    }
+
+    let mut dependencies = Vec::new();
+    for dependency in &modpack.modpacks {
+        validate_registry_id(dependency, manifest_path).map_err(|_| {
+            invalid_modpack_metadata(
+                manifest_path,
+                &id,
+                format!("invalid modpack dependency '{dependency}'"),
+            )
+        })?;
+        dependencies.push(RegistryModpackDependency {
+            target_kind: RegistryDependencyTargetKind::Modpack,
+            target_id: dependency.clone(),
+            ignored: false,
+        });
+    }
+    for dependency in &modpack.mods {
+        let (target_kind, target_id) = parse_registry_dependency(dependency, manifest_path)
+            .map_err(|_| {
+                invalid_modpack_metadata(
+                    manifest_path,
+                    &id,
+                    format!("invalid dependency '{dependency}'"),
+                )
+            })?;
+        dependencies.push(RegistryModpackDependency {
+            target_kind,
+            target_id,
+            ignored: false,
+        });
+    }
+    for dependency in &modpack.ignore {
+        let (target_kind, target_id) = parse_registry_dependency(dependency, manifest_path)
+            .map_err(|_| {
+                invalid_modpack_metadata(
+                    manifest_path,
+                    &id,
+                    format!("invalid ignored dependency '{dependency}'"),
+                )
+            })?;
+        dependencies.push(RegistryModpackDependency {
+            target_kind,
+            target_id,
+            ignored: true,
+        });
+    }
+    if dependencies.iter().any(|dependency| {
+        dependency.target_kind == RegistryDependencyTargetKind::Modpack
+            && dependency.target_id == id
+    }) {
+        return Err(invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            "a modpack cannot depend on itself",
+        ));
+    }
+
+    Ok(Some(RegistryModpackManifest {
+        id,
+        title,
+        version,
+        modpack,
+        dependencies,
+    }))
+}
+
+pub fn parse_registry_dependency(
+    value: &str,
+    manifest_path: &Path,
+) -> Result<(RegistryDependencyTargetKind, String)> {
+    let (kind, id) = if let Some(id) = value.strip_prefix(MODPACK_PREFIX) {
+        (RegistryDependencyTargetKind::Modpack, id)
+    } else {
+        (RegistryDependencyTargetKind::Mod, value)
+    };
+    validate_registry_id(id, manifest_path)?;
+    Ok((kind, id.to_owned()))
 }
 
 fn resolve_package_version(
@@ -204,12 +368,24 @@ fn invalid_metadata(
     }
 }
 
+fn invalid_modpack_metadata(
+    manifest_path: &Path,
+    id: &str,
+    reason: impl Into<String>,
+) -> PatchworkError {
+    PatchworkError::InvalidModpackMetadata {
+        id: id.to_owned(),
+        manifest_path: manifest_path.to_path_buf(),
+        reason: reason.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_support_mod_with_workspace_version() {
+    fn parses_api_mod_with_workspace_version() {
         let workspace_source = r#"
 [workspace]
 members = ["mods/api"]
@@ -224,7 +400,7 @@ version.workspace = true
 
 [package.metadata.mod]
 title = "Inventory API"
-support = true
+api = true
 "#;
         let workspace_path = Path::new("Cargo.toml");
         let manifest_path = Path::new("mods/api/Cargo.toml");
@@ -242,7 +418,8 @@ support = true
         assert_eq!(parsed.id, "inventory-api");
         assert_eq!(parsed.title, "Inventory API");
         assert_eq!(parsed.version, "1.2.3");
-        assert!(parsed.mod_info.support);
+        assert!(parsed.mod_info.api);
+        assert!(!parsed.mod_info.support);
     }
 
     #[test]
@@ -254,5 +431,37 @@ support = true
         )
         .unwrap();
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parses_registry_modpack_and_typed_dependencies() {
+        let source = r#"
+version = "1.2.3"
+name = "Example Pack"
+modpacks = ["foundation"]
+mods = ["renderer", "modpack/ui"]
+ignore = ["legacy-renderer"]
+"#;
+        let parsed = parse_registry_modpack_manifest(source, Path::new("packs/example.toml"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.id, "example");
+        assert_eq!(parsed.version, "1.2.3");
+        assert_eq!(parsed.dependencies.len(), 4);
+        assert_eq!(
+            parsed.dependencies[0].target_kind,
+            RegistryDependencyTargetKind::Modpack
+        );
+        assert!(parsed.dependencies[3].ignored);
+    }
+
+    #[test]
+    fn registry_modpack_requires_a_semantic_version() {
+        let error = parse_registry_modpack_manifest(
+            "name = \"Unversioned pack\"\nmods = []",
+            Path::new("packs/example.toml"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing field `version`"));
     }
 }

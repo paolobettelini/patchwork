@@ -91,17 +91,20 @@ CREATE TABLE mod_versions (
 CREATE TABLE mod_version_dependencies (
     version_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     relation_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    target_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     target_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     position INT NOT NULL,
-    PRIMARY KEY (version_id, relation_kind, target_id),
+    PRIMARY KEY (version_id, relation_kind, target_kind, target_id),
     CONSTRAINT mod_version_dependencies_version_fk FOREIGN KEY (version_id)
         REFERENCES mod_versions(id) ON DELETE CASCADE,
     CONSTRAINT mod_version_dependencies_kind_check
         CHECK (relation_kind IN ('init', 'run', 'ownership')),
+    CONSTRAINT mod_version_dependencies_target_kind_check
+        CHECK (target_kind IN ('mod', 'modpack')),
     CONSTRAINT mod_version_dependencies_position_check CHECK (position >= 0),
     CONSTRAINT mod_version_dependencies_position_unique
         UNIQUE (version_id, relation_kind, position),
-    INDEX mod_version_dependencies_target_idx (relation_kind, target_id)
+    INDEX mod_version_dependencies_target_idx (target_kind, target_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE registry_scans (
@@ -132,9 +135,11 @@ CREATE TABLE registry_scans (
 CREATE TABLE registry_scan_entries (
     id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
     scan_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    mod_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    project_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    project_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     title VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    description TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
     repository_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
     source_tree_oid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     manifest_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
@@ -153,43 +158,77 @@ CREATE TABLE registry_scan_entries (
         REFERENCES registry_scans(id) ON DELETE CASCADE,
     CONSTRAINT registry_scan_entries_status_check
         CHECK (status IN ('new_mod', 'new_version', 'unchanged', 'version_conflict', 'error')),
+    CONSTRAINT registry_scan_entries_project_kind_check
+        CHECK (project_kind IN ('mod', 'modpack')),
     INDEX registry_scan_entries_scan_idx (scan_id),
-    INDEX registry_scan_entries_mod_idx (mod_id, version)
+    INDEX registry_scan_entries_project_idx (project_kind, project_id, version)
 ) ENGINE=InnoDB;
 
 CREATE TABLE modpacks (
     id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
-    title VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-    description TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-    published_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    downloads BIGINT NOT NULL DEFAULT 0,
     publisher_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    repository_url VARCHAR(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
-    manifest_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
-    source_ref VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
-    logo_url VARCHAR(2048) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    repository_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    source_base_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    latest_version_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    downloads BIGINT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT modpacks_downloads_check CHECK (downloads >= 0),
     CONSTRAINT modpacks_publisher_fk FOREIGN KEY (publisher_uuid)
         REFERENCES accounts(uuid) ON DELETE RESTRICT,
-    INDEX modpacks_title_idx (title),
+    CONSTRAINT modpacks_repository_fk FOREIGN KEY (repository_id)
+        REFERENCES repositories(id) ON DELETE RESTRICT,
     INDEX modpacks_publisher_idx (publisher_uuid),
-    INDEX modpacks_published_at_idx (published_at),
-    INDEX modpacks_repository_idx (repository_url(255), manifest_path(255))
+    INDEX modpacks_created_at_idx (created_at),
+    INDEX modpacks_repository_idx (repository_id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE modpack_dependencies (
+CREATE TABLE modpack_versions (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
     modpack_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    version VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    title VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    description TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+    repository_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    source_commit VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    source_tree_oid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    manifest_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    manifest_blob_oid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    manifest_sha256 CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    readme_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    readme_blob_oid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    image_path VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL,
+    image_blob_oid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    metadata_json TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+    published_by CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    published_github_user_id BIGINT NOT NULL,
+    published_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    yanked_at DATETIME NULL,
+    CONSTRAINT modpack_versions_modpack_version_unique UNIQUE (modpack_id, version),
+    CONSTRAINT modpack_versions_modpack_fk FOREIGN KEY (modpack_id)
+        REFERENCES modpacks(id) ON DELETE RESTRICT,
+    CONSTRAINT modpack_versions_publisher_fk FOREIGN KEY (published_by)
+        REFERENCES accounts(uuid) ON DELETE RESTRICT,
+    CONSTRAINT modpack_versions_github_user_positive CHECK (published_github_user_id > 0),
+    INDEX modpack_versions_modpack_idx (modpack_id, published_at),
+    INDEX modpack_versions_source_idx (source_commit, source_tree_oid)
+) ENGINE=InnoDB;
+
+CREATE TABLE modpack_version_dependencies (
+    version_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     relation_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    target_kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     target_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     position INT NOT NULL,
-    PRIMARY KEY (modpack_id, relation_kind, target_id),
-    CONSTRAINT modpack_dependencies_owner_fk FOREIGN KEY (modpack_id)
-        REFERENCES modpacks(id) ON DELETE CASCADE,
-    CONSTRAINT modpack_dependencies_kind_check
+    PRIMARY KEY (version_id, relation_kind, target_kind, target_id),
+    CONSTRAINT modpack_version_dependencies_version_fk FOREIGN KEY (version_id)
+        REFERENCES modpack_versions(id) ON DELETE CASCADE,
+    CONSTRAINT modpack_version_dependencies_kind_check
         CHECK (relation_kind IN ('mod', 'modpack', 'ignore')),
-    CONSTRAINT modpack_dependencies_position_check CHECK (position >= 0),
-    CONSTRAINT modpack_dependencies_position_unique UNIQUE (modpack_id, position),
-    INDEX modpack_dependencies_target_idx (relation_kind, target_id)
+    CONSTRAINT modpack_version_dependencies_target_kind_check
+        CHECK (target_kind IN ('mod', 'modpack')),
+    CONSTRAINT modpack_version_dependencies_position_check CHECK (position >= 0),
+    CONSTRAINT modpack_version_dependencies_position_unique UNIQUE (version_id, relation_kind, position),
+    INDEX modpack_version_dependencies_target_idx (target_kind, target_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE web_sessions (

@@ -1,10 +1,12 @@
 use leptos::prelude::*;
+use patchwork_registry_types::{RegistryProjectKind, RegistryProjectRef, is_generated_mod_id};
 
 use crate::icons::{RefreshCwIcon, UploadIcon, UserIcon};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PublishedProject {
     pub id: String,
+    pub project_kind: RegistryProjectKind,
     pub title: String,
     pub kind: String,
     pub downloads: i64,
@@ -20,7 +22,8 @@ pub fn ProfilePage(
     account_name: String,
     mods: Vec<PublishedProject>,
     modpacks: Vec<PublishedProject>,
-    on_rescan: Callback<String>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_rescan: Callback<RegistryProjectRef>,
     rescan_pending: Signal<Option<String>>,
     children: Children,
 ) -> impl IntoView {
@@ -60,8 +63,8 @@ pub fn ProfilePage(
             {github_connection}
 
             <section class="profile-published-grid">
-                <PublishedSection title="Mods" projects=mods on_rescan rescan_pending />
-                <PublishedSection title="Modpacks" projects=modpacks on_rescan rescan_pending />
+                <PublishedSection title="Mods" projects=mods on_open_project on_rescan rescan_pending />
+                <PublishedSection title="Modpacks" projects=modpacks on_open_project on_rescan rescan_pending />
             </section>
         </div>
     }
@@ -71,7 +74,8 @@ pub fn ProfilePage(
 fn PublishedSection(
     title: &'static str,
     projects: Vec<PublishedProject>,
-    on_rescan: Callback<String>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_rescan: Callback<RegistryProjectRef>,
     rescan_pending: Signal<Option<String>>,
 ) -> impl IntoView {
     let projects_count = projects.len();
@@ -92,21 +96,28 @@ fn PublishedSection(
                     key=|project| project.id.clone()
                     children=move |project| {
                         let project_id = project.id.clone();
+                        let project_kind = project.project_kind;
+                        let generated = project_kind == RegistryProjectKind::Mod
+                            && is_generated_mod_id(&project.id);
                         let pending_id = project.id.clone();
+                        let open_id = project.id.clone();
                         let version = project.latest_version.clone();
                         let version_view = if let Some(version) = version {
                             view! { <span>{format!("Latest {version}")}</span> }.into_any()
                         } else {
                             view! { <></> }.into_any()
                         };
-                        let project_action = if project.can_rescan {
+                        let project_action = if project.can_rescan && !generated {
                             view! {
                                 <button
                                     type="button"
                                     class="published-rescan-action"
                                     title="Scan the current default branch"
                                     disabled=move || rescan_pending.get().is_some()
-                                    on:click=move |_| on_rescan.run(project_id.clone())
+                                    on:click=move |_| on_rescan.run(RegistryProjectRef {
+                                        project_kind,
+                                        project_id: project_id.clone(),
+                                    })
                                 >
                                     <RefreshCwIcon />
                                     <span>{move || if rescan_pending.get().as_deref() == Some(pending_id.as_str()) {
@@ -123,7 +134,17 @@ fn PublishedSection(
                         view! {
                             <article class="published-item">
                                 <div class="published-project-copy">
-                                    <h3>{project.title}</h3>
+                                    <button
+                                        type="button"
+                                        class="published-project-link"
+                                        disabled=generated
+                                        on:click=move |_| on_open_project.run(RegistryProjectRef {
+                                            project_kind,
+                                            project_id: open_id.clone(),
+                                        })
+                                    >
+                                        <h3>{project.title}</h3>
+                                    </button>
                                     <p>{project.id}</p>
                                     {version_view}
                                 </div>

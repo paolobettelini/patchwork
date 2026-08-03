@@ -84,8 +84,8 @@ During early development the database uses a single baseline migration. Delete
 the local SQLite file and sign in again after schema changes; the mdBook's
 [database chapter](documentation/src/database.md) documents this policy.
 
-Authenticated users with a linked GitHub account can scan and publish mods from
-Upload on either client. Patchwork pins the default branch to an exact commit,
+Authenticated users with a linked GitHub account can scan and publish mods and
+loose versioned modpack TOMLs from Upload on either client. Patchwork pins the default branch to an exact commit,
 walks GitHub trees without cloning, previews immutable versions, and publishes
 only selected server-side scan entries. The complete contract is in
 [Registry publication](documentation/src/registry_publication.md).
@@ -105,14 +105,25 @@ run = []
 ownership = []
 ```
 
-An API, asset-only crate, or other selected mod with no lifecycle object uses:
+An API contract with no lifecycle object uses:
 
 ```toml
 [package.metadata.mod]
-support = true
+api = true
 ```
 
-Support mods are real selected mods and Cargo dependencies, but Patchwork does
-not generate `init()` or `run()` calls for them. See the
+An asset-only, codegen-only, or other selected mod with no lifecycle object
+instead uses `support = true`. Both are real selected mods and Cargo
+dependencies, but Patchwork does not generate `init()` or `run()` calls for
+them. The flags are mutually exclusive, and every API mod requires exactly one
+selected normal provider declared with `provides = "<api-id>"`. See the
 [metadata reference](documentation/src/metadata_reference.md) for the complete
 format, providers, modpacks, codegen, assets, and favicons.
+
+Dependencies between selected Patchwork mods should use sibling Cargo paths so
+Compose and domain codegen can inspect their manifests. Plain helper libraries
+should use a distributable Git or registry source; local development can patch
+that source back to the checkout with `.cargo/config.toml`. Generated crates
+preserve these library sources instead of requiring every dependency to be a
+downloaded Patchwork mod. See [Mods and Cargo metadata](documentation/src/mods.md)
+and [Generic codegen](documentation/src/codegen.md).

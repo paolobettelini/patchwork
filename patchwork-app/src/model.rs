@@ -5,6 +5,7 @@ pub(crate) enum AppTab {
     Home,
     Browse,
     Upload,
+    Project,
     Profile,
     Settings,
 }
@@ -20,6 +21,9 @@ pub(crate) enum SettingsTab {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LauncherSettings {
     pub(crate) theme: String,
+    pub(crate) backend: String,
+    #[serde(default)]
+    pub(crate) local_folders: Vec<String>,
     pub(crate) cargo_target_dir: String,
     pub(crate) mod_cache: String,
     pub(crate) modpacks_cache: String,
@@ -42,6 +46,34 @@ pub(crate) struct LauncherModpack {
     pub(crate) accent: String,
     pub(crate) icon_data_url: Option<String>,
     pub(crate) icon_version: String,
+    pub(crate) updates_available: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegistryInstallReport {
+    pub(crate) installed: usize,
+    pub(crate) up_to_date: usize,
+    pub(crate) errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherInstallResult {
+    pub(crate) profile: LauncherModpack,
+    pub(crate) report: RegistryInstallReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RegistryDownloadEvent {
+    pub(crate) running: bool,
+    pub(crate) phase: String,
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+    pub(crate) current: Option<String>,
+    pub(crate) message: String,
+    pub(crate) errors: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -58,6 +90,7 @@ pub(crate) struct DependencyPage {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) version: String,
     pub(crate) editable_profile: bool,
     pub(crate) distinct_dependency_count: usize,
     pub(crate) modpacks: Vec<DependencyEntry>,
@@ -65,6 +98,15 @@ pub(crate) struct DependencyPage {
     pub(crate) diagnostics: Vec<DependencyDiagnostic>,
     pub(crate) icon_data_url: Option<String>,
     pub(crate) icon_version: String,
+    pub(crate) source_kind: String,
+    pub(crate) publisher_name: Option<String>,
+    pub(crate) published_at: Option<String>,
+    pub(crate) downloads: Option<i64>,
+    pub(crate) repository_url: Option<String>,
+    pub(crate) repository_path: Option<String>,
+    pub(crate) source_commit: Option<String>,
+    pub(crate) source_tree_oid: Option<String>,
+    pub(crate) manifest_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

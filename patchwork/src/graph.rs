@@ -44,6 +44,30 @@ fn build_provider_map(mods_map: &HashMap<String, ModInfo>) -> Result<HashMap<Str
         }
     }
 
+    for (api, provider) in &provider_map {
+        match mods_map.get(api) {
+            Some(info) if info.api => {}
+            Some(_) => {
+                return Err(PatchworkError::InvalidApiProviderTarget {
+                    api: api.clone(),
+                    provider: provider.clone(),
+                });
+            }
+            None => {
+                return Err(PatchworkError::MissingDependency {
+                    dependent_mod: provider.clone(),
+                    dependency: api.clone(),
+                });
+            }
+        }
+    }
+
+    for (name, info) in mods_map {
+        if info.api && !provider_map.contains_key(name) {
+            return Err(PatchworkError::MissingApiProvider { api: name.clone() });
+        }
+    }
+
     Ok(provider_map)
 }
 
@@ -182,15 +206,19 @@ fn resolve_dependency_name(
     mods_map: &HashMap<String, ModInfo>,
     provider_map: &HashMap<String, String>,
 ) -> Result<String> {
-    if mods_map.get(dep).map(|info| info.support).unwrap_or(false) {
+    if mods_map.get(dep).is_some_and(|info| info.api) {
         if let Some(provider) = provider_map.get(dep) {
             Ok(provider.clone())
         } else {
-            Err(PatchworkError::MissingDependency {
-                dependent_mod: dependent_mod.to_string(),
-                dependency: dep.to_string(),
+            Err(PatchworkError::MissingApiProvider {
+                api: dep.to_string(),
             })
         }
+    } else if mods_map.get(dep).is_some_and(|info| info.support) {
+        Err(PatchworkError::NonLifecycleDependency {
+            dependent_mod: dependent_mod.to_string(),
+            dependency: dep.to_string(),
+        })
     } else if mods_map.contains_key(dep) {
         Ok(dep.to_string())
     } else if let Some(provider) = provider_map.get(dep) {
@@ -200,5 +228,74 @@ fn resolve_dependency_name(
             dependent_mod: dependent_mod.to_string(),
             dependency: dep.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{CodegenDeclaration, Dependencies};
+
+    fn mod_info(entry: Option<&str>, api: bool, support: bool, provides: Option<&str>) -> ModInfo {
+        ModInfo {
+            title: None,
+            entry: entry.map(str::to_owned),
+            dependencies: Dependencies::default(),
+            provides: provides.map(str::to_owned),
+            support,
+            api,
+            codegen: Vec::<CodegenDeclaration>::new(),
+        }
+    }
+
+    #[test]
+    fn api_mod_requires_exactly_one_selected_provider() {
+        let mut mods = HashMap::new();
+        mods.insert(
+            "inventory-api".to_owned(),
+            mod_info(None, true, false, None),
+        );
+
+        assert!(matches!(
+            resolve(mods),
+            Err(PatchworkError::MissingApiProvider { api }) if api == "inventory-api"
+        ));
+    }
+
+    #[test]
+    fn api_dependency_resolves_to_provider_while_api_remains_selected() {
+        let mut consumer = mod_info(Some("Consumer"), false, false, None);
+        consumer.dependencies.run.push("inventory-api".to_owned());
+
+        let mut mods = HashMap::new();
+        mods.insert(
+            "inventory-api".to_owned(),
+            mod_info(None, true, false, None),
+        );
+        mods.insert(
+            "inventory-default".to_owned(),
+            mod_info(
+                Some("InventoryDefault"),
+                false,
+                false,
+                Some("inventory-api"),
+            ),
+        );
+        mods.insert("consumer".to_owned(), consumer);
+
+        let resolved = resolve(mods).unwrap();
+        assert_eq!(
+            resolved
+                .provider_map
+                .get("inventory-api")
+                .map(String::as_str),
+            Some("inventory-default")
+        );
+        assert!(
+            resolved
+                .mods
+                .iter()
+                .any(|(name, info)| name == "inventory-api" && info.api)
+        );
     }
 }

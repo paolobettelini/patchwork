@@ -24,12 +24,6 @@ pub enum DatabaseError {
 
     #[error("{entity} `{key}` already exists")]
     Conflict { entity: &'static str, key: String },
-
-    #[error("invalid dependency kind stored in the database: `{0}`")]
-    InvalidDependencyKind(String),
-
-    #[error("invalid modpack manifest: {0}")]
-    Manifest(#[from] toml::de::Error),
 }
 
 pub(crate) fn map_write_error(

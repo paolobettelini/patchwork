@@ -1,5 +1,5 @@
 use crate::error::{PatchworkError, Result};
-use crate::model::{CargoManifest, Dependencies, ModInfo, Modpack};
+use crate::model::{CargoManifest, Dependencies, ModInfo, Modpack, is_generated_mod_id};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,7 +43,7 @@ pub fn load_mods(
         selection
             .mods
             .into_iter()
-            .filter(|name| !ignored.contains(name))
+            .filter(|name| !ignored.contains(name) && !is_generated_mod_id(name))
             .collect(),
     );
     let mut selected_set = selected.iter().cloned().collect::<HashSet<_>>();
@@ -54,7 +54,10 @@ pub fn load_mods(
         let mod_name = selected[index].clone();
         index += 1;
 
-        if ignored.contains(&mod_name) || mods.contains_key(&mod_name) {
+        if ignored.contains(&mod_name)
+            || is_generated_mod_id(&mod_name)
+            || mods.contains_key(&mod_name)
+        {
             continue;
         }
 
@@ -66,6 +69,9 @@ pub fn load_mods(
             &mut selected,
             &mut selected_set,
         )?;
+        if let Some(provided_api) = &mod_info.provides {
+            select_mod(provided_api, &ignored, &mut selected, &mut selected_set);
+        }
         mods.insert(mod_name, mod_info);
     }
 
@@ -127,7 +133,9 @@ fn collect_modpack_tree(
         }
 
         validate_mod_name(mod_name, "modpack mods list")?;
-        selection.mods.push(mod_name.clone());
+        if !is_generated_mod_id(mod_name) {
+            selection.mods.push(mod_name.clone());
+        }
     }
 
     for ignored_mod in &modpack.ignore {
@@ -191,12 +199,27 @@ fn expand_dependency_list(
                 selected_set,
             )?;
             expanded.extend(mods);
-        } else {
+        } else if !is_generated_mod_id(dependency) {
+            select_mod(dependency, ignored, selected, selected_set);
             expanded.push(dependency.clone());
         }
     }
 
     Ok(dedup(expanded))
+}
+
+fn select_mod(
+    mod_name: &str,
+    ignored: &HashSet<String>,
+    selected: &mut Vec<String>,
+    selected_set: &mut HashSet<String>,
+) {
+    if !ignored.contains(mod_name)
+        && !is_generated_mod_id(mod_name)
+        && selected_set.insert(mod_name.to_owned())
+    {
+        selected.push(mod_name.to_owned());
+    }
 }
 
 fn expand_modpack_reference(
@@ -220,6 +243,10 @@ fn expand_modpack_reference(
 
     let mut expanded = Vec::new();
     for mod_name in dependency_selection.mods {
+        if is_generated_mod_id(&mod_name) {
+            continue;
+        }
+
         if ignored.contains(&mod_name) {
             selected_set.remove(&mod_name);
             selected.retain(|selected_mod| selected_mod != &mod_name);

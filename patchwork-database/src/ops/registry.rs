@@ -11,17 +11,19 @@ use uuid::Uuid;
 use crate::db::Database;
 use crate::error::{DatabaseError, Result, map_write_error};
 use crate::models::{
-    CreateRegistryScan, CreateRegistryScanEntry, Mod, NewModRow, NewModVersionDependencyRow,
-    NewModVersionRow, NewRegistryScanEntryRow, NewRegistryScanRow, NewRepositoryRow,
+    CreateRegistryScan, CreateRegistryScanEntry, Mod, Modpack, NewModRow,
+    NewModVersionDependencyRow, NewModVersionRow, NewModpackRow, NewModpackVersionDependencyRow,
+    NewModpackVersionRow, NewRegistryScanEntryRow, NewRegistryScanRow, NewRepositoryRow,
     PublishedRegistryVersion, RegistryPublishResult, RegistryScan, RegistryScanEntry,
     RegistryScanWithEntries, Repository,
 };
 use crate::schema::{
-    mod_version_dependencies, mod_versions, mods, registry_scan_entries, registry_scans,
-    repositories,
+    mod_version_dependencies, mod_versions, modpack_version_dependencies, modpack_versions,
+    modpacks, mods, registry_scan_entries, registry_scans, repositories,
 };
 use crate::validation::{
-    normalize_package_id, normalize_repo_path, normalize_repository_url, normalize_title,
+    normalize_description, normalize_package_id, normalize_repo_path, normalize_repository_url,
+    normalize_title,
 };
 
 const PROVIDER_GITHUB: &str = "github";
@@ -31,6 +33,7 @@ const MAX_SCAN_ENTRIES: usize = 1024;
 #[serde(rename_all = "camelCase")]
 struct StoredDependency {
     kind: String,
+    target_kind: String,
     target_id: String,
     #[allow(dead_code)]
     available: bool,
@@ -45,7 +48,7 @@ impl Database {
         if input.entries.len() > MAX_SCAN_ENTRIES {
             return validation(
                 "entries",
-                format!("must contain at most {MAX_SCAN_ENTRIES} mods"),
+                format!("must contain at most {MAX_SCAN_ENTRIES} projects"),
             );
         }
         if input.github_user_id <= 0 || input.github_repository_id <= 0 {
@@ -213,104 +216,24 @@ impl Database {
             let repository = upsert_repository(connection, &scan, now)?;
             let mut published = Vec::with_capacity(entries.len());
             for entry in entries {
-                let existing_mod = mods::table
-                    .find(&entry.mod_id)
-                    .select(Mod::as_select())
-                    .first(connection)
-                    .optional()?;
-
-                match (entry.status.as_str(), existing_mod.as_ref()) {
-                    ("new_mod", None) => {
-                        let row = NewModRow {
-                            id: &entry.mod_id,
-                            publisher_uuid: &publisher_uuid,
-                            repository_id: &repository.id,
-                            source_base_path: &scan.base_path,
-                            latest_version_id: None,
-                            downloads: 0,
-                        };
-                        diesel::insert_into(mods::table)
-                            .values(&row)
-                            .execute(connection)
-                            .map_err(|error| map_write_error(error, "mod", &entry.mod_id))?;
-                    }
-                    ("new_version", Some(existing)) => {
-                        if existing.publisher_uuid != publisher_uuid
-                            || existing.repository_id != repository.id
-                        {
-                            return Err(DatabaseError::Conflict {
-                                entity: "mod",
-                                key: format!(
-                                    "{} belongs to another publisher or repository",
-                                    entry.mod_id
-                                ),
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(DatabaseError::Conflict {
-                            entity: "registry_scan",
-                            key: format!(
-                                "registry state changed for {}; run the scan again",
-                                entry.mod_id
-                            ),
-                        });
-                    }
-                }
-
-                if mod_versions::table
-                    .filter(mod_versions::mod_id.eq(&entry.mod_id))
-                    .filter(mod_versions::version.eq(&entry.version))
-                    .select(mod_versions::id)
-                    .first::<String>(connection)
-                    .optional()?
-                    .is_some()
-                {
-                    return Err(DatabaseError::Conflict {
-                        entity: "registry_scan",
-                        key: format!(
-                            "{} {} was published after this scan; scan again",
-                            entry.mod_id, entry.version
-                        ),
-                    });
-                }
-
-                let version_id = Uuid::new_v4().hyphenated().to_string();
-                let version_row = NewModVersionRow {
-                    id: &version_id,
-                    mod_id: &entry.mod_id,
-                    version: &entry.version,
-                    title: &entry.title,
-                    repository_path: &entry.repository_path,
-                    source_commit: &scan.resolved_commit,
-                    source_tree_oid: &entry.source_tree_oid,
-                    manifest_path: &entry.manifest_path,
-                    manifest_blob_oid: &entry.manifest_blob_oid,
-                    manifest_sha256: &entry.manifest_sha256,
-                    readme_path: entry.readme_path.as_deref(),
-                    readme_blob_oid: entry.readme_blob_oid.as_deref(),
-                    image_path: entry.image_path.as_deref(),
-                    image_blob_oid: entry.image_blob_oid.as_deref(),
-                    metadata_json: &entry.metadata_json,
-                    published_by: &publisher_uuid,
-                    published_github_user_id: github_user_id,
-                };
-                diesel::insert_into(mod_versions::table)
-                    .values(&version_row)
-                    .execute(connection)
-                    .map_err(|error| {
-                        map_write_error(
-                            error,
-                            "mod_version",
-                            format!("{} {}", entry.mod_id, entry.version),
-                        )
-                    })?;
-                insert_version_dependencies(connection, &version_id, &entry.dependencies_json)?;
-                update_latest_version(connection, &entry.mod_id, &version_id, &entry.version)?;
-                published.push(PublishedRegistryVersion {
-                    mod_id: entry.mod_id,
-                    version: entry.version,
-                    version_id,
+                published.push(match entry.project_kind.as_str() {
+                    "mod" => publish_mod_entry(
+                        connection,
+                        &scan,
+                        &repository,
+                        &publisher_uuid,
+                        github_user_id,
+                        entry,
+                    )?,
+                    "modpack" => publish_modpack_entry(
+                        connection,
+                        &scan,
+                        &repository,
+                        &publisher_uuid,
+                        github_user_id,
+                        entry,
+                    )?,
+                    _ => return validation("project_kind", "contains an unsupported project kind"),
                 });
             }
 
@@ -333,15 +256,264 @@ impl Database {
     }
 }
 
+fn publish_mod_entry(
+    connection: &mut crate::db::DbConnection,
+    scan: &RegistryScan,
+    repository: &Repository,
+    publisher_uuid: &str,
+    github_user_id: i64,
+    entry: RegistryScanEntry,
+) -> Result<PublishedRegistryVersion> {
+    let existing = mods::table
+        .find(&entry.project_id)
+        .select(Mod::as_select())
+        .first(connection)
+        .optional()?;
+    validate_or_create_mod(
+        connection,
+        scan,
+        repository,
+        publisher_uuid,
+        &entry,
+        existing.as_ref(),
+    )?;
+    if mod_versions::table
+        .filter(mod_versions::mod_id.eq(&entry.project_id))
+        .filter(mod_versions::version.eq(&entry.version))
+        .select(mod_versions::id)
+        .first::<String>(connection)
+        .optional()?
+        .is_some()
+    {
+        return concurrently_published(&entry);
+    }
+
+    let version_id = Uuid::new_v4().hyphenated().to_string();
+    let row = NewModVersionRow {
+        id: &version_id,
+        mod_id: &entry.project_id,
+        version: &entry.version,
+        title: &entry.title,
+        repository_path: &entry.repository_path,
+        source_commit: &scan.resolved_commit,
+        source_tree_oid: &entry.source_tree_oid,
+        manifest_path: &entry.manifest_path,
+        manifest_blob_oid: &entry.manifest_blob_oid,
+        manifest_sha256: &entry.manifest_sha256,
+        readme_path: entry.readme_path.as_deref(),
+        readme_blob_oid: entry.readme_blob_oid.as_deref(),
+        image_path: entry.image_path.as_deref(),
+        image_blob_oid: entry.image_blob_oid.as_deref(),
+        metadata_json: &entry.metadata_json,
+        published_by: publisher_uuid,
+        published_github_user_id: github_user_id,
+    };
+    diesel::insert_into(mod_versions::table)
+        .values(&row)
+        .execute(connection)
+        .map_err(|error| {
+            map_write_error(
+                error,
+                "mod_version",
+                format!("{} {}", entry.project_id, entry.version),
+            )
+        })?;
+    insert_mod_version_dependencies(connection, &version_id, &entry.dependencies_json)?;
+    update_latest_mod_version(connection, &entry.project_id, &version_id, &entry.version)?;
+    Ok(PublishedRegistryVersion {
+        project_kind: entry.project_kind,
+        project_id: entry.project_id,
+        version: entry.version,
+        version_id,
+    })
+}
+
+fn validate_or_create_mod(
+    connection: &mut crate::db::DbConnection,
+    scan: &RegistryScan,
+    repository: &Repository,
+    publisher_uuid: &str,
+    entry: &RegistryScanEntry,
+    existing: Option<&Mod>,
+) -> Result<()> {
+    match (entry.status.as_str(), existing) {
+        ("new_mod", None) => {
+            let row = NewModRow {
+                id: &entry.project_id,
+                publisher_uuid,
+                repository_id: &repository.id,
+                source_base_path: &scan.base_path,
+                latest_version_id: None,
+                downloads: 0,
+            };
+            diesel::insert_into(mods::table)
+                .values(&row)
+                .execute(connection)
+                .map_err(|error| map_write_error(error, "mod", &entry.project_id))?;
+            Ok(())
+        }
+        ("new_version", Some(existing))
+            if existing.publisher_uuid == publisher_uuid
+                && existing.repository_id == repository.id =>
+        {
+            Ok(())
+        }
+        ("new_version", Some(_)) => Err(DatabaseError::Conflict {
+            entity: "mod",
+            key: format!(
+                "{} belongs to another publisher or repository",
+                entry.project_id
+            ),
+        }),
+        _ => registry_changed(entry),
+    }
+}
+
+fn publish_modpack_entry(
+    connection: &mut crate::db::DbConnection,
+    scan: &RegistryScan,
+    repository: &Repository,
+    publisher_uuid: &str,
+    github_user_id: i64,
+    entry: RegistryScanEntry,
+) -> Result<PublishedRegistryVersion> {
+    let existing = modpacks::table
+        .find(&entry.project_id)
+        .select(Modpack::as_select())
+        .first(connection)
+        .optional()?;
+    validate_or_create_modpack(
+        connection,
+        scan,
+        repository,
+        publisher_uuid,
+        &entry,
+        existing.as_ref(),
+    )?;
+    if modpack_versions::table
+        .filter(modpack_versions::modpack_id.eq(&entry.project_id))
+        .filter(modpack_versions::version.eq(&entry.version))
+        .select(modpack_versions::id)
+        .first::<String>(connection)
+        .optional()?
+        .is_some()
+    {
+        return concurrently_published(&entry);
+    }
+
+    let version_id = Uuid::new_v4().hyphenated().to_string();
+    let row = NewModpackVersionRow {
+        id: &version_id,
+        modpack_id: &entry.project_id,
+        version: &entry.version,
+        title: &entry.title,
+        description: &entry.description,
+        repository_path: &entry.repository_path,
+        source_commit: &scan.resolved_commit,
+        source_tree_oid: &entry.source_tree_oid,
+        manifest_path: &entry.manifest_path,
+        manifest_blob_oid: &entry.manifest_blob_oid,
+        manifest_sha256: &entry.manifest_sha256,
+        readme_path: entry.readme_path.as_deref(),
+        readme_blob_oid: entry.readme_blob_oid.as_deref(),
+        image_path: entry.image_path.as_deref(),
+        image_blob_oid: entry.image_blob_oid.as_deref(),
+        metadata_json: &entry.metadata_json,
+        published_by: publisher_uuid,
+        published_github_user_id: github_user_id,
+    };
+    diesel::insert_into(modpack_versions::table)
+        .values(&row)
+        .execute(connection)
+        .map_err(|error| {
+            map_write_error(
+                error,
+                "modpack_version",
+                format!("{} {}", entry.project_id, entry.version),
+            )
+        })?;
+    insert_modpack_version_dependencies(connection, &version_id, &entry.dependencies_json)?;
+    update_latest_modpack_version(connection, &entry.project_id, &version_id, &entry.version)?;
+    Ok(PublishedRegistryVersion {
+        project_kind: entry.project_kind,
+        project_id: entry.project_id,
+        version: entry.version,
+        version_id,
+    })
+}
+
+fn validate_or_create_modpack(
+    connection: &mut crate::db::DbConnection,
+    scan: &RegistryScan,
+    repository: &Repository,
+    publisher_uuid: &str,
+    entry: &RegistryScanEntry,
+    existing: Option<&Modpack>,
+) -> Result<()> {
+    match (entry.status.as_str(), existing) {
+        ("new_mod", None) => {
+            let row = NewModpackRow {
+                id: &entry.project_id,
+                publisher_uuid,
+                repository_id: &repository.id,
+                source_base_path: &scan.base_path,
+                latest_version_id: None,
+                downloads: 0,
+            };
+            diesel::insert_into(modpacks::table)
+                .values(&row)
+                .execute(connection)
+                .map_err(|error| map_write_error(error, "modpack", &entry.project_id))?;
+            Ok(())
+        }
+        ("new_version", Some(existing))
+            if existing.publisher_uuid == publisher_uuid
+                && existing.repository_id == repository.id =>
+        {
+            Ok(())
+        }
+        ("new_version", Some(_)) => Err(DatabaseError::Conflict {
+            entity: "modpack",
+            key: format!(
+                "{} belongs to another publisher or repository",
+                entry.project_id
+            ),
+        }),
+        _ => registry_changed(entry),
+    }
+}
+
+fn concurrently_published<T>(entry: &RegistryScanEntry) -> Result<T> {
+    Err(DatabaseError::Conflict {
+        entity: "registry_scan",
+        key: format!(
+            "{} {} was published after this scan; scan again",
+            entry.project_id, entry.version
+        ),
+    })
+}
+
+fn registry_changed<T>(entry: &RegistryScanEntry) -> Result<T> {
+    Err(DatabaseError::Conflict {
+        entity: "registry_scan",
+        key: format!(
+            "registry state changed for {}; run the scan again",
+            entry.project_id
+        ),
+    })
+}
+
 fn insert_scan_entry(
     connection: &mut crate::db::DbConnection,
     scan_id: &str,
     input: &CreateRegistryScanEntry,
 ) -> Result<()> {
     let id = input.id.hyphenated().to_string();
-    let mod_id = normalize_package_id("mod_id", &input.mod_id)?;
+    let project_kind = normalize_project_kind(&input.project_kind)?;
+    let project_id = normalize_package_id("project_id", &input.project_id)?;
     let version = normalize_version(&input.version)?;
     let title = normalize_title(&input.title)?;
+    let description = normalize_description(&input.description)?;
     let repository_path = normalize_repo_path("repository_path", &input.repository_path, true)?;
     let source_tree_oid = normalize_oid("source_tree_oid", &input.source_tree_oid)?;
     let manifest_path = normalize_repo_path("manifest_path", &input.manifest_path, false)?;
@@ -363,9 +535,11 @@ fn insert_scan_entry(
     let row = NewRegistryScanEntryRow {
         id: &id,
         scan_id,
-        mod_id: &mod_id,
+        project_kind: &project_kind,
+        project_id: &project_id,
         version: &version,
         title: &title,
+        description: &description,
         repository_path: &repository_path,
         source_tree_oid: &source_tree_oid,
         manifest_path: &manifest_path,
@@ -453,34 +627,46 @@ fn upsert_repository(
         .map_err(DatabaseError::from)
 }
 
-fn insert_version_dependencies(
+fn stored_dependencies(dependencies_json: &str) -> Result<Vec<StoredDependency>> {
+    serde_json::from_str::<Vec<StoredDependency>>(dependencies_json).map_err(|error| {
+        DatabaseError::Validation {
+            field: "dependencies_json",
+            message: error.to_string(),
+        }
+    })
+}
+
+fn insert_mod_version_dependencies(
     connection: &mut crate::db::DbConnection,
     version_id: &str,
     dependencies_json: &str,
 ) -> Result<()> {
-    let dependencies =
-        serde_json::from_str::<Vec<StoredDependency>>(dependencies_json).map_err(|error| {
-            DatabaseError::Validation {
-                field: "dependencies_json",
-                message: error.to_string(),
-            }
-        })?;
+    let dependencies = stored_dependencies(dependencies_json)?;
     let mut seen = HashSet::new();
     let mut positions = [0_i32; 3];
     for dependency in dependencies {
+        if dependency.kind == "provides" {
+            continue;
+        }
         let kind_index = match dependency.kind.as_str() {
             "init" => 0,
             "run" => 1,
             "ownership" => 2,
             _ => return validation("dependency.kind", "must be init, run, or ownership"),
         };
+        let target_kind = normalize_project_kind(&dependency.target_kind)?;
         let target_id = normalize_package_id("dependency.target_id", &dependency.target_id)?;
-        if !seen.insert((dependency.kind.clone(), target_id.clone())) {
+        if !seen.insert((
+            dependency.kind.clone(),
+            target_kind.clone(),
+            target_id.clone(),
+        )) {
             continue;
         }
         let row = NewModVersionDependencyRow {
             version_id,
             relation_kind: &dependency.kind,
+            target_kind: &target_kind,
             target_id: &target_id,
             position: positions[kind_index],
         };
@@ -492,7 +678,46 @@ fn insert_version_dependencies(
     Ok(())
 }
 
-fn update_latest_version(
+fn insert_modpack_version_dependencies(
+    connection: &mut crate::db::DbConnection,
+    version_id: &str,
+    dependencies_json: &str,
+) -> Result<()> {
+    let dependencies = stored_dependencies(dependencies_json)?;
+    let mut seen = HashSet::new();
+    let mut positions = [0_i32; 3];
+    for dependency in dependencies {
+        let kind_index = match dependency.kind.as_str() {
+            "mod" => 0,
+            "modpack" => 1,
+            "ignore" => 2,
+            _ => return validation("dependency.kind", "must be mod, modpack, or ignore"),
+        };
+        let target_kind = normalize_project_kind(&dependency.target_kind)?;
+        let target_id = normalize_package_id("dependency.target_id", &dependency.target_id)?;
+        if !seen.insert((
+            dependency.kind.clone(),
+            target_kind.clone(),
+            target_id.clone(),
+        )) {
+            continue;
+        }
+        let row = NewModpackVersionDependencyRow {
+            version_id,
+            relation_kind: &dependency.kind,
+            target_kind: &target_kind,
+            target_id: &target_id,
+            position: positions[kind_index],
+        };
+        positions[kind_index] += 1;
+        diesel::insert_into(modpack_version_dependencies::table)
+            .values(&row)
+            .execute(connection)?;
+    }
+    Ok(())
+}
+
+fn update_latest_mod_version(
     connection: &mut crate::db::DbConnection,
     mod_id: &str,
     new_version_id: &str,
@@ -518,6 +743,42 @@ fn update_latest_version(
             .execute(connection)?;
     }
     Ok(())
+}
+
+fn update_latest_modpack_version(
+    connection: &mut crate::db::DbConnection,
+    modpack_id: &str,
+    new_version_id: &str,
+    new_version: &str,
+) -> Result<()> {
+    let current = modpacks::table
+        .find(modpack_id)
+        .select(modpacks::latest_version_id)
+        .first::<Option<String>>(connection)?;
+    let should_update = if let Some(current_id) = current {
+        let current_version = modpack_versions::table
+            .find(current_id)
+            .select(modpack_versions::version)
+            .first::<String>(connection)?;
+        Version::parse(new_version).map_err(version_error)?
+            > Version::parse(&current_version).map_err(version_error)?
+    } else {
+        true
+    };
+    if should_update {
+        diesel::update(modpacks::table.find(modpack_id))
+            .set(modpacks::latest_version_id.eq(Some(new_version_id)))
+            .execute(connection)?;
+    }
+    Ok(())
+}
+
+fn normalize_project_kind(value: &str) -> Result<String> {
+    match value {
+        "mod" | "MOD" => Ok("mod".to_owned()),
+        "modpack" | "MODPACK" => Ok("modpack".to_owned()),
+        _ => validation("project_kind", "must be mod or modpack"),
+    }
 }
 
 fn normalize_version(value: &str) -> Result<String> {
@@ -655,7 +916,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::models::CreateAccount;
+    use crate::models::{CreateAccount, Pagination};
 
     fn database_with_publisher() -> (Database, Uuid) {
         let directory = tempdir().unwrap().keep();
@@ -686,6 +947,7 @@ mod tests {
         publisher: Uuid,
         scan_id: Uuid,
         entry_id: Uuid,
+        project_kind: &str,
         status: &str,
         version: &str,
         tree_oid: char,
@@ -708,12 +970,30 @@ mod tests {
             expires_at: now + Duration::minutes(20),
             entries: vec![CreateRegistryScanEntry {
                 id: entry_id,
-                mod_id: "example-mod".to_owned(),
+                project_kind: project_kind.to_owned(),
+                project_id: if project_kind == "modpack" {
+                    "example-pack".to_owned()
+                } else {
+                    "example-mod".to_owned()
+                },
                 version: version.to_owned(),
-                title: "Example Mod".to_owned(),
-                repository_path: "mods/example-mod".to_owned(),
+                title: if project_kind == "modpack" {
+                    "Example Pack".to_owned()
+                } else {
+                    "Example Mod".to_owned()
+                },
+                description: if project_kind == "modpack" {
+                    "A test modpack".to_owned()
+                } else {
+                    String::new()
+                },
+                repository_path: "mods".to_owned(),
                 source_tree_oid: tree_oid.to_string().repeat(40),
-                manifest_path: "mods/example-mod/Cargo.toml".to_owned(),
+                manifest_path: if project_kind == "modpack" {
+                    "mods/example-pack.toml".to_owned()
+                } else {
+                    "mods/example-mod/Cargo.toml".to_owned()
+                },
                 manifest_blob_oid: "d".repeat(40),
                 manifest_sha256: "e".repeat(64),
                 readme_path: Some("mods/example-mod/README.md".to_owned()),
@@ -722,8 +1002,11 @@ mod tests {
                 image_blob_oid: None,
                 status: status.to_owned(),
                 metadata_json: "{}".to_owned(),
-                dependencies_json: r#"[{"kind":"run","targetId":"support-api","available":false}]"#
-                    .to_owned(),
+                dependencies_json: if project_kind == "modpack" {
+                    r#"[{"kind":"mod","targetKind":"MOD","targetId":"support-api","available":false}]"#.to_owned()
+                } else {
+                    r#"[{"kind":"run","targetKind":"MOD","targetId":"support-api","available":false}]"#.to_owned()
+                },
                 warnings_json: "[]".to_owned(),
                 errors_json: "[]".to_owned(),
             }],
@@ -738,7 +1021,7 @@ mod tests {
         let entry_id = Uuid::new_v4();
         database
             .create_registry_scan(
-                scan(publisher, scan_id, entry_id, "new_mod", "1.0.0", 'c'),
+                scan(publisher, scan_id, entry_id, "mod", "new_mod", "1.0.0", 'c'),
                 now,
             )
             .unwrap();
@@ -754,6 +1037,18 @@ mod tests {
         assert_eq!(state.versions[0].version, "1.0.0");
         assert_eq!(state.versions[0].source_tree_oid, "c".repeat(40));
         assert_eq!(state.versions[0].source_commit, "a".repeat(40));
+        assert_eq!(database.increment_mod_downloads("example-mod").unwrap(), 1);
+        assert_eq!(database.increment_mod_downloads("example-mod").unwrap(), 2);
+        let browse = database
+            .search_mods("example", Pagination::new(10, 0).unwrap())
+            .unwrap();
+        assert_eq!(browse.len(), 1);
+        assert_eq!(browse[0].downloads, 2);
+        assert_eq!(browse[0].manifest_sha256, "e".repeat(64));
+        assert_eq!(
+            browse[0].readme_path.as_deref(),
+            Some("mods/example-mod/README.md")
+        );
 
         let repeated = database
             .publish_registry_scan(scan_id, publisher, 42, &[entry_id], now)
@@ -769,7 +1064,15 @@ mod tests {
         let first_entry = Uuid::new_v4();
         database
             .create_registry_scan(
-                scan(publisher, first_scan, first_entry, "new_mod", "1.0.0", 'c'),
+                scan(
+                    publisher,
+                    first_scan,
+                    first_entry,
+                    "mod",
+                    "new_mod",
+                    "1.0.0",
+                    'c',
+                ),
                 now,
             )
             .unwrap();
@@ -782,6 +1085,7 @@ mod tests {
                     publisher,
                     stale_scan,
                     stale_entry,
+                    "mod",
                     "new_version",
                     "1.0.0",
                     '9',
@@ -797,5 +1101,66 @@ mod tests {
             .publish_registry_scan(stale_scan, publisher, 42, &[stale_entry], now)
             .unwrap_err();
         assert!(matches!(conflict, DatabaseError::Conflict { .. }));
+    }
+
+    #[test]
+    fn publishes_immutable_modpack_version_and_dependencies() {
+        let (database, publisher) = database_with_publisher();
+        let now = Utc::now().naive_utc();
+        let scan_id = Uuid::new_v4();
+        let entry_id = Uuid::new_v4();
+        database
+            .create_registry_scan(
+                scan(
+                    publisher, scan_id, entry_id, "modpack", "new_mod", "2.1.0", '7',
+                ),
+                now,
+            )
+            .unwrap();
+
+        let published = database
+            .publish_registry_scan(scan_id, publisher, 42, &[entry_id], now)
+            .unwrap();
+        assert_eq!(published.published[0].project_kind, "modpack");
+        let state = database
+            .get_registry_modpack_state("example-pack")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.versions[0].version, "2.1.0");
+        assert_eq!(state.versions[0].description, "A test modpack");
+        assert_eq!(state.versions[0].source_tree_oid, "7".repeat(40));
+        assert_eq!(
+            database
+                .increment_modpack_downloads("example-pack")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            database
+                .increment_modpack_downloads("example-pack")
+                .unwrap(),
+            2
+        );
+        let browse = database
+            .search_modpacks("test modpack", Pagination::new(10, 0).unwrap())
+            .unwrap();
+        assert_eq!(browse.len(), 1);
+        assert_eq!(browse[0].downloads, 2);
+        assert_eq!(browse[0].description, "A test modpack");
+
+        let mut connection = database.connection().unwrap();
+        let dependencies = modpack_version_dependencies::table
+            .filter(modpack_version_dependencies::version_id.eq(&state.versions[0].id))
+            .select((
+                modpack_version_dependencies::relation_kind,
+                modpack_version_dependencies::target_kind,
+                modpack_version_dependencies::target_id,
+            ))
+            .load::<(String, String, String)>(&mut connection)
+            .unwrap();
+        assert_eq!(
+            dependencies,
+            vec![("mod".to_owned(), "mod".to_owned(), "support-api".to_owned())]
+        );
     }
 }

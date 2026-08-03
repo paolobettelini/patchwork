@@ -50,7 +50,7 @@ pub(super) fn ProfilesSidebar(
                         view! {
                             <div class="empty-modpacks">
                                 <strong>"No modpacks yet"</strong>
-                                <span>"Create one, import one, or point Settings → Installation → Profiles to a folder with .toml files."</span>
+                                <span>"Create one, import one, point Settings → Installation → Profiles to a folder with .toml files, or download one fromt the Browse tab."</span>
                             </div>
                         }
                     }

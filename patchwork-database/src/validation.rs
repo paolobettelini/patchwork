@@ -80,17 +80,6 @@ pub(crate) fn normalize_description(value: &str) -> Result<String> {
     normalize_bounded_text("description", value, 4_000, true, true)
 }
 
-pub(crate) fn normalize_source_ref(value: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty() || value.len() > 255 {
-        return validation("source_ref", "must contain between 1 and 255 characters");
-    }
-    if value.chars().any(char::is_control) {
-        return validation("source_ref", "must not contain control characters");
-    }
-    Ok(value.to_owned())
-}
-
 pub(crate) fn normalize_repository_url(value: &str) -> Result<String> {
     let mut parsed = Url::parse(value.trim()).map_err(|error| DatabaseError::Validation {
         field: "repository_url",
@@ -132,18 +121,6 @@ pub(crate) fn normalize_repository_url(value: &str) -> Result<String> {
     );
     parsed.set_path(&normalized_path);
     Ok(parsed.to_string().trim_end_matches('/').to_owned())
-}
-
-pub(crate) fn normalize_https_url(field: &'static str, value: &str) -> Result<String> {
-    let mut parsed = Url::parse(value.trim()).map_err(|error| DatabaseError::Validation {
-        field,
-        message: error.to_string(),
-    })?;
-    if parsed.scheme() != "https" {
-        return validation(field, "must use HTTPS");
-    }
-    parsed.set_fragment(None);
-    Ok(parsed.to_string())
 }
 
 pub(crate) fn normalize_repo_path(

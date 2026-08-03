@@ -487,17 +487,129 @@ impl GithubClient {
         blob_sha: &str,
         maximum_size: u64,
     ) -> Result<Vec<u8>, String> {
-        validate_git_oid(blob_sha)?;
-        let url = api_url(&[
-            "repos",
+        self.blob_by_coordinates(
             &repository.owner,
             &repository.name,
-            "git",
-            "blobs",
+            &repository.access_token,
             blob_sha,
-        ])?;
+            maximum_size,
+        )
+        .await
+    }
+
+    pub(crate) async fn published_blob(
+        &self,
+        owner: &str,
+        repository: &str,
+        repository_id: i64,
+        blob_sha: &str,
+        maximum_size: u64,
+    ) -> Result<Vec<u8>, String> {
+        let token = self
+            .published_repository_token(owner, repository, repository_id)
+            .await?;
+        self.blob_by_coordinates(owner, repository, &token, blob_sha, maximum_size)
+            .await
+    }
+
+    pub(crate) async fn published_tree(
+        &self,
+        owner: &str,
+        repository: &str,
+        repository_id: i64,
+        tree_sha: &str,
+    ) -> Result<(GithubTree, String), String> {
+        let token = self
+            .published_repository_token(owner, repository, repository_id)
+            .await?;
+        validate_git_oid(tree_sha)?;
+        let mut url = api_url(&["repos", owner, repository, "git", "trees", tree_sha])?;
+        url.query_pairs_mut().append_pair("recursive", "1");
         let response = self
-            .authorized_get(url, &repository.access_token)
+            .authorized_get(url, &token)
+            .await?
+            .json::<TreeResponse>()
+            .await
+            .map_err(|error| format!("invalid GitHub recursive tree response: {error}"))?;
+        if response.truncated {
+            return Err("GitHub truncated the published source tree".to_owned());
+        }
+        let tree = GithubTree {
+            sha: response.sha,
+            entries: response
+                .tree
+                .into_iter()
+                .map(|entry| GithubTreeEntry {
+                    path: entry.path,
+                    kind: entry.kind,
+                    mode: entry.mode,
+                    sha: entry.sha,
+                    size: entry.size,
+                })
+                .collect(),
+        };
+        Ok((tree, token))
+    }
+
+    pub(crate) async fn published_blob_with_token(
+        &self,
+        owner: &str,
+        repository: &str,
+        access_token: &str,
+        blob_sha: &str,
+        maximum_size: u64,
+    ) -> Result<Vec<u8>, String> {
+        self.blob_by_coordinates(owner, repository, access_token, blob_sha, maximum_size)
+            .await
+    }
+
+    async fn published_repository_token(
+        &self,
+        owner: &str,
+        repository: &str,
+        repository_id: i64,
+    ) -> Result<String, String> {
+        validate_repository_coordinate("owner", owner)?;
+        validate_repository_coordinate("repository", repository)?;
+        if repository_id <= 0 {
+            return Err("GitHub repository ID must be positive".to_owned());
+        }
+
+        let installation_url = format!("{GITHUB_API_URL}/repos/{owner}/{repository}/installation");
+        let installation = self
+            .http
+            .get(installation_url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+            .bearer_auth(self.app_jwt()?)
+            .send()
+            .await
+            .map_err(|error| format!("GitHub installation lookup failed: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("GitHub installation lookup failed: {error}"))?
+            .json::<InstallationResponse>()
+            .await
+            .map_err(|error| format!("invalid GitHub installation response: {error}"))?;
+        let installation_id = i64::try_from(installation.id)
+            .map_err(|_| "GitHub installation ID exceeds the supported range".to_owned())?;
+        let token = self
+            .installation_access_token(installation_id, &[repository_id])
+            .await?;
+        Ok(token.token)
+    }
+
+    async fn blob_by_coordinates(
+        &self,
+        owner: &str,
+        repository: &str,
+        access_token: &str,
+        blob_sha: &str,
+        maximum_size: u64,
+    ) -> Result<Vec<u8>, String> {
+        validate_git_oid(blob_sha)?;
+        let url = api_url(&["repos", owner, repository, "git", "blobs", blob_sha])?;
+        let response = self
+            .authorized_get(url, access_token)
             .await?
             .json::<BlobResponse>()
             .await

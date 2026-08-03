@@ -2,8 +2,8 @@ use crate::{
     icons::{FolderIcon, TrashIcon},
     model::{LauncherModpack, LauncherSettings, SettingsTab},
     tauri_bridge::{
-        list_modpacks, select_folder, select_settings_file, update_launcher_path,
-        update_launcher_theme,
+        list_modpacks, select_folder, select_settings_file, update_launcher_backend,
+        update_launcher_local_folders, update_launcher_path, update_launcher_theme,
     },
 };
 use leptos::prelude::*;
@@ -41,10 +41,32 @@ pub(crate) fn SettingsPage(
     set_selected_modpack: WriteSignal<usize>,
 ) -> impl IntoView {
     let (settings_tab, set_settings_tab) = signal(SettingsTab::General);
-    let (remote_entries, set_remote_entries) = signal(vec![DynamicEntry::empty(0)]);
-    let (_remote_next_id, set_remote_next_id) = signal(1_u32);
     let (local_entries, set_local_entries) = signal(vec![DynamicEntry::empty(0)]);
     let (_local_next_id, set_local_next_id) = signal(1_u32);
+    let (local_entries_initialized, set_local_entries_initialized) = signal(false);
+
+    Effect::new(move |_| {
+        if local_entries_initialized.get() {
+            return;
+        }
+        let Some(settings) = settings.get() else {
+            return;
+        };
+        let mut entries = settings
+            .local_folders
+            .into_iter()
+            .enumerate()
+            .map(|(id, value)| DynamicEntry {
+                id: id as u32,
+                value,
+            })
+            .collect::<Vec<_>>();
+        let next_id = entries.len() as u32;
+        entries.push(DynamicEntry::empty(next_id));
+        set_local_entries.set(entries);
+        set_local_next_id.set(next_id + 1);
+        set_local_entries_initialized.set(true);
+    });
 
     view! {
         <div class="settings-layout">
@@ -123,25 +145,30 @@ pub(crate) fn SettingsPage(
             <section class=move || settings_panel_class(settings_tab.get() == SettingsTab::Registries)>
                 <div class="settings-section">
                     <div class="section-heading">
-                        <h2>"Remote database"</h2>
-                        <span>"Registry endpoints"</span>
+                        <h2>"Backend"</h2>
+                        <span>"Patchwork service"</span>
                     </div>
-                    <RemoteDatabaseFields
-                        entries=remote_entries
-                        set_entries=set_remote_entries
-                        set_next_id=set_remote_next_id
+                    <BackendField
+                        value=move || settings.with(|settings| {
+                            settings
+                                .as_ref()
+                                .map(|settings| settings.backend.clone())
+                                .unwrap_or_default()
+                        })
+                        set_settings
                     />
                 </div>
 
                 <div class="settings-section">
                     <div class="section-heading">
                         <h2>"Local folders"</h2>
-                        <span>"Folders scanned for local mods"</span>
+                        <span>"Folders scanned for local mods and modpacks"</span>
                     </div>
                     <LocalFolderFields
                         entries=local_entries
                         set_entries=set_local_entries
                         set_next_id=set_local_next_id
+                        set_settings
                     />
                 </div>
             </section>
@@ -227,52 +254,37 @@ pub(crate) fn SettingsPage(
 }
 
 #[component]
-fn RemoteDatabaseFields(
-    entries: ReadSignal<Vec<DynamicEntry>>,
-    set_entries: WriteSignal<Vec<DynamicEntry>>,
-    set_next_id: WriteSignal<u32>,
+fn BackendField(
+    value: impl Fn() -> String + Copy + Send + Sync + 'static,
+    set_settings: WriteSignal<Option<LauncherSettings>>,
 ) -> impl IntoView {
+    let (error, set_error) = signal(None::<String>);
     view! {
-        <div class="field-stack">
-            <For
-                each=move || entries.get()
-                key=|entry| entry.id
-                children=move |entry: DynamicEntry| {
-                    let row_id = entry.id;
-                    let value = entry.value;
-
-                    view! {
-                        <div class="input-row">
-                            <input
-                                type="text"
-                                prop:value=value
-                                placeholder="https://registry.example/mods"
-                                on:input=move |event| {
-                                    update_dynamic_entries(
-                                        set_entries,
-                                        set_next_id,
-                                        row_id,
-                                        event_target_value(&event),
-                                    );
-                                }
-                            />
-                            <button
-                                type="button"
-                                class="icon-button danger"
-                                aria-label="Remove remote database"
-                                on:click=move |_| remove_dynamic_entry(
-                                    set_entries,
-                                    set_next_id,
-                                    row_id,
-                                )
-                            >
-                                <TrashIcon />
-                            </button>
-                        </div>
-                    }
+        <label class="path-input registry-backend-input">
+            <span class="path-label">
+                <strong>"Service URL"</strong>
+                <small>"Used for Browse, account, GitHub and publishing requests."</small>
+            </span>
+            <input
+                type="url"
+                inputmode="url"
+                placeholder="http://127.0.0.1:8080"
+                prop:value=value
+                on:change=move |event| {
+                    let backend = event_target_value(&event);
+                    leptos::task::spawn_local(async move {
+                        match update_launcher_backend(&backend).await {
+                            Ok(updated) => {
+                                set_error.set(None);
+                                set_settings.set(Some(updated));
+                            }
+                            Err(error) => set_error.set(Some(js_error_to_string(error))),
+                        }
+                    });
                 }
             />
-        </div>
+            {move || error.get().map(|error| view! { <em class="field-error">{error}</em> })}
+        </label>
     }
 }
 
@@ -281,6 +293,7 @@ fn LocalFolderFields(
     entries: ReadSignal<Vec<DynamicEntry>>,
     set_entries: WriteSignal<Vec<DynamicEntry>>,
     set_next_id: WriteSignal<u32>,
+    set_settings: WriteSignal<Option<LauncherSettings>>,
 ) -> impl IntoView {
     view! {
         <div class="field-stack">
@@ -305,6 +318,7 @@ fn LocalFolderFields(
                                         event_target_value(&event),
                                     );
                                 }
+                                on:change=move |_| persist_local_folders(entries, set_settings)
                             />
                             <button
                                 type="button"
@@ -319,6 +333,7 @@ fn LocalFolderFields(
                                                 row_id,
                                                 path,
                                             );
+                                            persist_local_folders(entries, set_settings);
                                         }
                                     });
                                 }
@@ -329,11 +344,10 @@ fn LocalFolderFields(
                                 type="button"
                                 class="icon-button danger"
                                 aria-label="Remove local folder"
-                                on:click=move |_| remove_dynamic_entry(
-                                    set_entries,
-                                    set_next_id,
-                                    row_id,
-                                )
+                                on:click=move |_| {
+                                    remove_dynamic_entry(set_entries, set_next_id, row_id);
+                                    persist_local_folders(entries, set_settings);
+                                }
                             >
                                 <TrashIcon />
                             </button>
@@ -436,6 +450,23 @@ fn save_path_setting(
                 }
             }
             Err(error) => set_error.set(Some(js_error_to_string(error))),
+        }
+    });
+}
+
+fn persist_local_folders(
+    entries: ReadSignal<Vec<DynamicEntry>>,
+    set_settings: WriteSignal<Option<LauncherSettings>>,
+) {
+    let folders = entries
+        .get_untracked()
+        .into_iter()
+        .map(|entry| entry.value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    leptos::task::spawn_local(async move {
+        if let Ok(updated) = update_launcher_local_folders(folders).await {
+            set_settings.set(Some(updated));
         }
     });
 }

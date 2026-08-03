@@ -96,6 +96,11 @@ pub fn run_tasks(
         let had_existing_output = task.temporary_output_crate_dir.is_dir();
         let mut command = Command::new("cargo");
         command
+            // Cargo discovers `.cargo/config.toml` from its working directory.
+            // Running generators from the mods folder lets a source checkout
+            // patch distributable Git-only helper libraries back to local
+            // paths, while downloaded mod caches still use Git normally.
+            .current_dir(mods_folder)
             .arg("run")
             .arg("--manifest-path")
             .arg(&task.generator_manifest)

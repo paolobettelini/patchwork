@@ -3,6 +3,7 @@ use crate::{
     tauri_bridge::{load_dependency_page, toggle_profile_ignore},
 };
 use leptos::prelude::*;
+use patchwork_registry_types::is_generated_mod_id;
 use wasm_bindgen::JsValue;
 
 #[component]
@@ -124,18 +125,22 @@ fn DependencyRow(
     let id = entry.id.clone();
     let name = entry.name.clone();
     let found = entry.found;
+    let generated = kind == "mod" && is_generated_mod_id(&id);
+    let clickable = found && !generated;
     let ignored = entry.ignored;
     let reason = entry
         .reason
         .clone()
         .unwrap_or_else(|| "Not Found".to_string());
     let row_id = id.clone();
-    let missing_reason = if found {
+    let missing_reason = if generated {
+        view! { <small class="generated-note">"Generated during compose"</small> }.into_any()
+    } else if found {
         view! {}.into_any()
     } else {
         view! { <small>{reason}</small> }.into_any()
     };
-    let ignore_button = if editable_profile && kind == "mod" {
+    let ignore_button = if editable_profile && kind == "mod" && !generated {
         let profile_id_for_click = profile_id.clone();
         let mod_id_for_click = id.clone();
         let ignore_class = if ignored {
@@ -170,13 +175,13 @@ fn DependencyRow(
     };
 
     view! {
-        <div class=dependency_row_class(found, ignored)>
+        <div class=dependency_row_class(found, ignored, generated)>
             <button
                 type="button"
                 class="dependency-row-main"
-                disabled=!found
+                disabled=!clickable
                 on:click=move |_| {
-                    if found {
+                    if clickable {
                         navigate_page(
                             kind.to_string(),
                             row_id.clone(),
@@ -230,11 +235,12 @@ fn load_page(
     });
 }
 
-fn dependency_row_class(found: bool, ignored: bool) -> &'static str {
-    match (found, ignored) {
-        (false, _) => "dependency-row missing",
-        (true, true) => "dependency-row ignored",
-        (true, false) => "dependency-row",
+fn dependency_row_class(found: bool, ignored: bool, generated: bool) -> &'static str {
+    match (found, ignored, generated) {
+        (_, _, true) => "dependency-row generated",
+        (false, _, false) => "dependency-row missing",
+        (true, true, false) => "dependency-row ignored",
+        (true, false, false) => "dependency-row",
     }
 }
 

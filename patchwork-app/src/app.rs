@@ -1,23 +1,29 @@
 use crate::{
     home::HomePage,
     icons::{ArrowRightToBracketIcon, GearIcon, HomeIcon, SearchIcon},
-    model::{AppTab, LauncherAuthStatus, LauncherModpack, LauncherSettings},
+    model::{AppTab, LauncherAuthStatus, LauncherModpack, LauncherSettings, RegistryDownloadEvent},
     settings::SettingsPage,
     tauri_bridge::{
-        auth_status, disconnect_github, list_modpacks, listen_patchwork_auth,
-        load_launcher_settings, logout_auth, refresh_auth_profile, registry_get_scan,
-        registry_publish_scan, registry_scan_progress, registry_start_rescan, registry_start_scan,
-        start_github_connect, start_oauth_login, update_auth_nickname,
+        auth_status, disconnect_github, download_profile_dependencies, list_modpacks,
+        listen_patchwork_auth, listen_registry_download, load_launcher_settings, logout_auth,
+        refresh_auth_profile, refresh_profiles, registry_add_to_profile, registry_browse,
+        registry_download_modpack_as_profile, registry_download_status, registry_get_scan,
+        registry_project_details, registry_publish_scan, registry_scan_progress,
+        registry_start_rescan, registry_start_scan, start_github_connect, start_oauth_login,
+        update_auth_nickname,
     },
 };
+use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use patchwork_registry_types::{
+    RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
+    RegistryProfileOption, RegistryProjectDetails, RegistryProjectKind, RegistryProjectRef,
     RegistryPublishRequest, RegistryScan, RegistryScanPhase, RegistryScanProgress,
-    RegistryScanRequest,
+    RegistryScanRequest, is_generated_mod_id,
 };
 use patchwork_ui::{
-    BrowsePage, GithubIcon, ProfilePage, PublishedProject as UiPublishedProject, UploadIcon,
-    UploadPage, UserIcon,
+    BrowsePage, GithubIcon, ProfilePage, PublishedProject as UiPublishedProject,
+    RegistryProjectPage, UploadIcon, UploadPage, UserIcon,
 };
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
@@ -39,12 +45,140 @@ pub(crate) fn App() -> impl IntoView {
     let (registry_error, set_registry_error) = signal(None::<String>);
     let (registry_notice, set_registry_notice) = signal(None::<String>);
     let (registry_rescan_pending, set_registry_rescan_pending) = signal(None::<String>);
+    let (browse_results, set_browse_results) = signal(Vec::<RegistryBrowseProject>::new());
+    let (browse_pending, set_browse_pending) = signal(false);
+    let (browse_action_pending, set_browse_action_pending) = signal(None::<String>);
+    let (browse_error, set_browse_error) = signal(None::<String>);
+    let (browse_warnings, set_browse_warnings) = signal(Vec::<String>::new());
+    let (browse_notice, set_browse_notice) = signal(None::<String>);
+    let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
+    let (project_pending, set_project_pending) = signal(false);
+    let (project_error, set_project_error) = signal(None::<String>);
+    let (download_event, set_download_event) = signal(None::<RegistryDownloadEvent>);
+
+    let open_registry_project = Callback::new(move |project: RegistryProjectRef| {
+        if project.project_kind == RegistryProjectKind::Mod
+            && is_generated_mod_id(&project.project_id)
+        {
+            return;
+        }
+        set_project_details.set(None);
+        set_project_error.set(None);
+        set_project_pending.set(true);
+        set_active_tab.set(AppTab::Project);
+        leptos::task::spawn_local(async move {
+            match registry_project_details(project).await {
+                Ok(details) => set_project_details.set(Some(details)),
+                Err(error) => set_project_error.set(Some(js_error_message(error))),
+            }
+            set_project_pending.set(false);
+        });
+    });
+
+    let browse_search = Callback::new(move |input: RegistryBrowseRequest| {
+        set_browse_pending.set(true);
+        set_browse_error.set(None);
+        set_browse_notice.set(None);
+        set_browse_warnings.set(Vec::new());
+        leptos::task::spawn_local(async move {
+            match registry_browse(input).await {
+                Ok(response) => {
+                    set_browse_results.set(response.projects);
+                    set_browse_warnings.set(response.warnings);
+                }
+                Err(error) => set_browse_error.set(Some(js_error_message(error))),
+            }
+            set_browse_pending.set(false);
+        });
+    });
+    let browse_download_profile = Callback::new(move |project: RegistryBrowseProject| {
+        let action_key = format!(
+            "{}:{}",
+            project.project_kind.route_segment(),
+            project.project_id
+        );
+        set_browse_action_pending.set(Some(action_key));
+        set_browse_error.set(None);
+        set_browse_notice.set(None);
+        leptos::task::spawn_local(async move {
+            match registry_download_modpack_as_profile(project).await {
+                Ok(result) => {
+                    let created = result.profile;
+                    let created_id = created.id.clone();
+                    let created_name = created.name.clone();
+                    if let Ok(loaded) = list_modpacks().await {
+                        let selected = loaded
+                            .iter()
+                            .position(|profile| profile.id == created_id)
+                            .unwrap_or(0);
+                        set_modpacks.set(loaded);
+                        set_selected_modpack.set(selected);
+                    } else {
+                        set_modpacks.update(|profiles| profiles.push(created));
+                        set_selected_modpack.set(modpacks.get().len().saturating_sub(1));
+                    }
+                    set_browse_notice.set(Some(format!(
+                        "Profile '{created_name}' created. Downloading dependencies..."
+                    )));
+
+                    match download_profile_dependencies(&created_id).await {
+                        Ok(dependencies) => {
+                            let installed = result.report.installed + dependencies.installed;
+                            set_browse_notice.set(Some(format!(
+                                "Profile '{created_name}' created. {installed} project(s) downloaded."
+                            )));
+                            if !dependencies.errors.is_empty() {
+                                set_browse_warnings
+                                    .update(|warnings| warnings.extend(dependencies.errors));
+                            }
+                        }
+                        Err(error) => {
+                            set_browse_warnings
+                                .update(|warnings| warnings.push(js_error_message(error)));
+                        }
+                    }
+                }
+                Err(error) => set_browse_error.set(Some(js_error_message(error))),
+            }
+            set_browse_action_pending.set(None);
+        });
+    });
+    let browse_add_to_profile = Callback::new(move |input: RegistryAddToProfileRequest| {
+        let action_key = format!(
+            "{}:{}",
+            input.project.project_kind.route_segment(),
+            input.project.project_id
+        );
+        set_browse_action_pending.set(Some(action_key));
+        set_browse_error.set(None);
+        set_browse_notice.set(None);
+        leptos::task::spawn_local(async move {
+            match registry_add_to_profile(input).await {
+                Ok(result) => {
+                    let updated = result.profile;
+                    set_browse_notice.set(Some(format!(
+                        "Profile '{}' updated. {} project(s) downloaded.",
+                        updated.name, result.report.installed
+                    )));
+                    if !result.report.errors.is_empty() {
+                        set_browse_warnings
+                            .update(|warnings| warnings.extend(result.report.errors));
+                    }
+                    if let Ok(loaded) = list_modpacks().await {
+                        set_modpacks.set(loaded);
+                    }
+                }
+                Err(error) => set_browse_error.set(Some(js_error_message(error))),
+            }
+            set_browse_action_pending.set(None);
+        });
+    });
 
     let upload_sign_in = Callback::new(move |()| {
         set_auth_error.set(None);
         set_auth_pending.set(true);
         leptos::task::spawn_local(async move {
-            match start_oauth_login(None).await {
+            match start_oauth_login().await {
                 Ok(status) => {
                     let is_complete = status.profile.is_some();
                     set_auth.set(Some(status));
@@ -114,7 +248,7 @@ pub(crate) fn App() -> impl IntoView {
             match registry_publish_scan(&scan_id, input).await {
                 Ok(published) => {
                     set_registry_notice.set(Some(format!(
-                        "Published {} mod version{}.",
+                        "Published {} project version{}.",
                         published.published.len(),
                         if published.published.len() == 1 {
                             ""
@@ -134,16 +268,16 @@ pub(crate) fn App() -> impl IntoView {
             set_registry_pending.set(false);
         });
     });
-    let profile_rescan = Callback::new(move |mod_id: String| {
+    let profile_rescan = Callback::new(move |project: RegistryProjectRef| {
         set_registry_error.set(None);
         set_registry_progress.set(None);
         set_registry_scan.set(None);
-        set_registry_rescan_pending.set(Some(mod_id.clone()));
+        set_registry_rescan_pending.set(Some(project.project_id.clone()));
         set_registry_pending.set(true);
         set_active_tab.set(AppTab::Upload);
         leptos::task::spawn_local(async move {
             let result = async {
-                let started = registry_start_rescan(&mod_id)
+                let started = registry_start_rescan(&project)
                     .await
                     .map_err(js_error_message)?;
                 poll_registry_scan(&started.job_id, set_registry_progress).await
@@ -171,15 +305,34 @@ pub(crate) fn App() -> impl IntoView {
         }
     });
 
+    let _ = listen_registry_download(move |event| {
+        set_download_event.set(Some(event));
+    });
+
+    leptos::task::spawn_local(async move {
+        loop {
+            if let Ok(status) = registry_download_status().await {
+                set_download_event.set(status);
+            }
+            TimeoutFuture::new(120).await;
+        }
+    });
+
     leptos::task::spawn_local(async move {
         if let Ok(loaded_settings) = load_launcher_settings().await {
             set_active_theme.set(theme_id_or_default(&loaded_settings.theme));
             set_settings.set(Some(loaded_settings));
         }
 
+        browse_search.run(RegistryBrowseRequest::default());
+
         if let Ok(loaded_modpacks) = list_modpacks().await {
             set_selected_modpack.set(0);
             set_modpacks.set(loaded_modpacks);
+        }
+
+        if let Ok(refreshed_modpacks) = refresh_profiles().await {
+            set_modpacks.set(refreshed_modpacks);
         }
 
         if let Ok(status) = auth_status().await {
@@ -205,7 +358,17 @@ pub(crate) fn App() -> impl IntoView {
 
     view! {
         <div class="app-shell" data-theme=move || active_theme.get()>
-            <TopBar active_tab set_active_tab auth set_auth auth_pending set_auth_pending auth_error set_auth_error />
+            <TopBar
+                active_tab
+                set_active_tab
+                auth
+                set_auth
+                auth_pending
+                set_auth_pending
+                auth_error
+                set_auth_error
+                download_event
+            />
 
             <div class="workspace">
                 <section class=move || page_class(active_tab.get() == AppTab::Home)>
@@ -218,7 +381,22 @@ pub(crate) fn App() -> impl IntoView {
                 </section>
 
                 <section class=move || page_class(active_tab.get() == AppTab::Browse)>
-                    <BrowsePage allow_downloads=true />
+                    <BrowsePage
+                        results=Signal::from(browse_results)
+                        profiles=Signal::derive(move || modpacks.get().into_iter().map(|profile| {
+                            RegistryProfileOption { id: profile.id, name: profile.name }
+                        }).collect())
+                        pending=Signal::from(browse_pending)
+                        action_pending=Signal::from(browse_action_pending)
+                        error=Signal::from(browse_error)
+                        warnings=Signal::from(browse_warnings)
+                        notice=Signal::from(browse_notice)
+                        allow_downloads=true
+                        on_search=browse_search
+                        on_open_project=open_registry_project
+                        on_download_profile=browse_download_profile
+                        on_add_to_profile=browse_add_to_profile
+                    />
                 </section>
 
                 <section class=move || page_class(active_tab.get() == AppTab::Upload)>
@@ -234,6 +412,16 @@ pub(crate) fn App() -> impl IntoView {
                         on_connect_github=upload_connect_github
                         on_scan=upload_scan
                         on_publish=upload_publish
+                        on_open_project=open_registry_project
+                    />
+                </section>
+
+                <section class=move || page_class(active_tab.get() == AppTab::Project)>
+                    <RegistryProjectPage
+                        details=Signal::from(project_details)
+                        pending=Signal::from(project_pending)
+                        error=Signal::from(project_error)
+                        on_open_dependency=open_registry_project
                     />
                 </section>
 
@@ -244,6 +432,7 @@ pub(crate) fn App() -> impl IntoView {
                         set_auth_error
                         github_pending
                         set_github_pending
+                        on_open_project=open_registry_project
                         on_rescan=profile_rescan
                         rescan_pending=Signal::from(registry_rescan_pending)
                         registry_error=Signal::from(registry_error)
@@ -275,12 +464,13 @@ fn TopBar(
     set_auth_pending: WriteSignal<bool>,
     auth_error: ReadSignal<Option<String>>,
     set_auth_error: WriteSignal<Option<String>>,
+    download_event: ReadSignal<Option<RegistryDownloadEvent>>,
 ) -> impl IntoView {
     let start_login = move |_| {
         set_auth_error.set(None);
         set_auth_pending.set(true);
         leptos::task::spawn_local(async move {
-            match start_oauth_login(None).await {
+            match start_oauth_login().await {
                 Ok(status) => {
                     let is_complete = status.profile.is_some();
                     set_auth.set(Some(status));
@@ -347,6 +537,46 @@ fn TopBar(
                 </button>
             </nav>
 
+            <Show when=move || download_event.get().is_some()>
+                {move || {
+                    download_event.get().map(|event| {
+                        let failed = !event.errors.is_empty();
+                        let progress = if event.total == 0 {
+                            4.0
+                        } else {
+                            ((event.completed as f64 / event.total as f64) * 100.0).clamp(4.0, 100.0)
+                        };
+                        let progress_count = format!(
+                            "[{}/{}]",
+                            event.completed.min(event.total),
+                            event.total
+                        );
+                        let count = event
+                            .current
+                            .as_deref()
+                            .map(|id| format!("{progress_count} {id}"))
+                            .unwrap_or(progress_count);
+                        let title = event.errors.first().cloned().unwrap_or_default();
+                        view! {
+                            <div
+                                class=if failed { "topbar-download error" } else { "topbar-download" }
+                                role="status"
+                                aria-live="polite"
+                                title=title
+                            >
+                                <div class="topbar-download-track" aria-hidden="true">
+                                    <span
+                                        class:indeterminate=event.total == 0
+                                        style:width=format!("{progress:.2}%")
+                                    ></span>
+                                </div>
+                                <span class="topbar-download-count">{count}</span>
+                            </div>
+                        }
+                    })
+                }}
+            </Show>
+
             <div class="topbar-actions">
                 <Show
                     when=move || auth.get().and_then(|status| status.profile).is_some()
@@ -387,7 +617,8 @@ fn AppProfilePage(
     set_auth_error: WriteSignal<Option<String>>,
     github_pending: ReadSignal<bool>,
     set_github_pending: WriteSignal<bool>,
-    on_rescan: Callback<String>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_rescan: Callback<RegistryProjectRef>,
     rescan_pending: Signal<Option<String>>,
     registry_error: Signal<Option<String>>,
 ) -> impl IntoView {
@@ -416,6 +647,7 @@ fn AppProfilePage(
                             account_name=profile.account.nickname.clone()
                             mods=ui_projects(&profile.mods)
                             modpacks=ui_projects(&profile.modpacks)
+                            on_open_project
                             on_rescan
                             rescan_pending
                         >
@@ -426,69 +658,69 @@ fn AppProfilePage(
                                 github_pending
                                 set_github_pending
                             />
-                        </ProfilePage>
-                        <div class="profile-local-actions">
-                            <Show
-                                when=move || editing_nickname.get()
-                                fallback=move || view! {
-                                    <button
-                                        type="button"
-                                        class="catalog-secondary-action"
-                                        on:click=move |_| {
-                                            if let Some(status) = auth.get() {
-                                                if let Some(profile) = status.profile {
-                                                    set_nickname_draft.set(profile.account.nickname);
-                                                }
-                                            }
-                                            set_nickname_error.set(None);
-                                            set_editing_nickname.set(true);
-                                        }
-                                    >
-                                        "Change username"
-                                    </button>
-                                }
-                            >
-                                <div class="nickname-editor">
-                                    <input
-                                        maxlength="16"
-                                        prop:value=move || nickname_draft.get()
-                                        on:input=move |event| set_nickname_draft.set(event_target_value(&event))
-                                    />
-                                    <button
-                                        type="button"
-                                        class="catalog-primary-action"
-                                        on:click=move |_| {
-                                            let nickname = nickname_draft.get();
-                                            set_nickname_error.set(None);
-                                            leptos::task::spawn_local(async move {
-                                                match update_auth_nickname(&nickname).await {
-                                                    Ok(status) => {
-                                                        set_auth.set(Some(status));
-                                                        set_editing_nickname.set(false);
+                            <div class="profile-local-actions">
+                                <Show
+                                    when=move || editing_nickname.get()
+                                    fallback=move || view! {
+                                        <button
+                                            type="button"
+                                            class="catalog-secondary-action"
+                                            on:click=move |_| {
+                                                if let Some(status) = auth.get() {
+                                                    if let Some(profile) = status.profile {
+                                                        set_nickname_draft.set(profile.account.nickname);
                                                     }
-                                                    Err(error) => set_nickname_error.set(Some(js_error_message(error))),
                                                 }
-                                            });
-                                        }
-                                    >
-                                        "Save"
-                                    </button>
-                                    <button
-                                        type="button"
-                                        class="catalog-secondary-action"
-                                        on:click=move |_| set_editing_nickname.set(false)
-                                    >
-                                        "Cancel"
-                                    </button>
-                                </div>
+                                                set_nickname_error.set(None);
+                                                set_editing_nickname.set(true);
+                                            }
+                                        >
+                                            "Change username"
+                                        </button>
+                                    }
+                                >
+                                    <div class="nickname-editor">
+                                        <input
+                                            maxlength="16"
+                                            prop:value=move || nickname_draft.get()
+                                            on:input=move |event| set_nickname_draft.set(event_target_value(&event))
+                                        />
+                                        <button
+                                            type="button"
+                                            class="catalog-primary-action"
+                                            on:click=move |_| {
+                                                let nickname = nickname_draft.get();
+                                                set_nickname_error.set(None);
+                                                leptos::task::spawn_local(async move {
+                                                    match update_auth_nickname(&nickname).await {
+                                                        Ok(status) => {
+                                                            set_auth.set(Some(status));
+                                                            set_editing_nickname.set(false);
+                                                        }
+                                                        Err(error) => set_nickname_error.set(Some(js_error_message(error))),
+                                                    }
+                                                });
+                                            }
+                                        >
+                                            "Save"
+                                        </button>
+                                        <button
+                                            type="button"
+                                            class="catalog-secondary-action"
+                                            on:click=move |_| set_editing_nickname.set(false)
+                                        >
+                                            "Cancel"
+                                        </button>
+                                    </div>
+                                </Show>
+                                <button type="button" class="catalog-secondary-action" on:click=sign_out>
+                                    "Sign out"
+                                </button>
+                            </div>
+                            <Show when=move || nickname_error.get().is_some()>
+                                <p class="auth-inline-error">{move || nickname_error.get().unwrap_or_default()}</p>
                             </Show>
-                            <button type="button" class="catalog-secondary-action" on:click=sign_out>
-                                "Sign out"
-                            </button>
-                        </div>
-                        <Show when=move || nickname_error.get().is_some()>
-                            <p class="auth-inline-error">{move || nickname_error.get().unwrap_or_default()}</p>
-                        </Show>
+                        </ProfilePage>
                         <Show when=move || registry_error.get().is_some()>
                             <p class="auth-inline-error">{move || registry_error.get().unwrap_or_default()}</p>
                         </Show>
@@ -629,6 +861,11 @@ fn ui_projects(projects: &[crate::model::PublishedProject]) -> Vec<UiPublishedPr
     projects
         .iter()
         .map(|project| UiPublishedProject {
+            project_kind: if project.kind.eq_ignore_ascii_case("modpack") {
+                RegistryProjectKind::Modpack
+            } else {
+                RegistryProjectKind::Mod
+            },
             id: project.id.clone(),
             title: project.title.clone(),
             kind: project.kind.clone(),

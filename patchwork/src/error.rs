@@ -25,6 +25,11 @@ pub enum PatchworkError {
         id: String,
         reason: &'static str,
     },
+    InvalidModpackMetadata {
+        id: String,
+        manifest_path: PathBuf,
+        reason: String,
+    },
     ModpackNotFound {
         id: String,
         folder: PathBuf,
@@ -53,6 +58,17 @@ pub enum PatchworkError {
         api: String,
         first_provider: String,
         second_provider: String,
+    },
+    MissingApiProvider {
+        api: String,
+    },
+    InvalidApiProviderTarget {
+        api: String,
+        provider: String,
+    },
+    NonLifecycleDependency {
+        dependent_mod: String,
+        dependency: String,
     },
     OwnershipConflict {
         message: String,
@@ -97,6 +113,7 @@ impl PatchworkError {
             PatchworkError::Toml { .. } => "toml",
             PatchworkError::InvalidUtf8Path { .. } => "invalid_utf8_path",
             PatchworkError::InvalidModpackId { .. } => "invalid_modpack_id",
+            PatchworkError::InvalidModpackMetadata { .. } => "invalid_modpack_metadata",
             PatchworkError::ModpackNotFound { .. } => "modpack_not_found",
             PatchworkError::ModpackCycle { .. } => "modpack_cycle",
             PatchworkError::InvalidModName { .. } => "invalid_mod_name",
@@ -104,6 +121,9 @@ impl PatchworkError {
             PatchworkError::MissingModMetadata { .. } => "missing_mod_metadata",
             PatchworkError::InvalidModMetadata { .. } => "invalid_mod_metadata",
             PatchworkError::DuplicateProvider { .. } => "duplicate_provider",
+            PatchworkError::MissingApiProvider { .. } => "missing_api_provider",
+            PatchworkError::InvalidApiProviderTarget { .. } => "invalid_api_provider_target",
+            PatchworkError::NonLifecycleDependency { .. } => "non_lifecycle_dependency",
             PatchworkError::OwnershipConflict { .. } => "ownership_conflict",
             PatchworkError::MissingDependency { .. } => "missing_dependency",
             PatchworkError::SelfDependency { .. } => "self_dependency",
@@ -173,6 +193,15 @@ impl fmt::Display for PatchworkError {
             PatchworkError::InvalidModpackId { id, reason } => {
                 write!(f, "invalid modpack id '{id}': {reason}")
             }
+            PatchworkError::InvalidModpackMetadata {
+                id,
+                manifest_path,
+                reason,
+            } => write!(
+                f,
+                "invalid modpack '{id}' at {}: {reason}",
+                manifest_path.display()
+            ),
             PatchworkError::ModpackNotFound { id, folder } => {
                 write!(f, "modpack '{id}' not found in {}", folder.display())
             }
@@ -222,6 +251,20 @@ impl fmt::Display for PatchworkError {
             } => write!(
                 f,
                 "multiple providers for API '{api}': '{first_provider}' and '{second_provider}'"
+            ),
+            PatchworkError::MissingApiProvider { api } => {
+                write!(f, "API mod '{api}' has no selected implementation")
+            }
+            PatchworkError::InvalidApiProviderTarget { api, provider } => write!(
+                f,
+                "mod '{provider}' provides '{api}', but the selected target '{api}' does not declare api = true"
+            ),
+            PatchworkError::NonLifecycleDependency {
+                dependent_mod,
+                dependency,
+            } => write!(
+                f,
+                "mod '{dependent_mod}' uses support mod '{dependency}' as a lifecycle dependency"
             ),
             PatchworkError::OwnershipConflict { message } => write!(f, "{message}"),
             PatchworkError::MissingDependency {

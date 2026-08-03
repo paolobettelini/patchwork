@@ -73,9 +73,10 @@ diesel::table! {
 }
 
 diesel::table! {
-    mod_version_dependencies (version_id, relation_kind, target_id) {
+    mod_version_dependencies (version_id, relation_kind, target_kind, target_id) {
         version_id -> Text,
         relation_kind -> Text,
+        target_kind -> Text,
         target_id -> Text,
         position -> Integer,
     }
@@ -106,9 +107,11 @@ diesel::table! {
     registry_scan_entries (id) {
         id -> Text,
         scan_id -> Text,
-        mod_id -> Text,
+        project_kind -> Text,
+        project_id -> Text,
         version -> Text,
         title -> Text,
+        description -> Text,
         repository_path -> Text,
         source_tree_oid -> Text,
         manifest_path -> Text,
@@ -129,22 +132,45 @@ diesel::table! {
 diesel::table! {
     modpacks (id) {
         id -> Text,
-        title -> Text,
-        description -> Text,
-        published_at -> Timestamp,
-        downloads -> BigInt,
         publisher_uuid -> Text,
-        repository_url -> Text,
-        manifest_path -> Text,
-        source_ref -> Text,
-        logo_url -> Nullable<Text>,
+        repository_id -> Text,
+        source_base_path -> Text,
+        latest_version_id -> Nullable<Text>,
+        downloads -> BigInt,
+        created_at -> Timestamp,
     }
 }
 
 diesel::table! {
-    modpack_dependencies (modpack_id, relation_kind, target_id) {
+    modpack_versions (id) {
+        id -> Text,
         modpack_id -> Text,
+        version -> Text,
+        title -> Text,
+        description -> Text,
+        repository_path -> Text,
+        source_commit -> Text,
+        source_tree_oid -> Text,
+        manifest_path -> Text,
+        manifest_blob_oid -> Text,
+        manifest_sha256 -> Text,
+        readme_path -> Nullable<Text>,
+        readme_blob_oid -> Nullable<Text>,
+        image_path -> Nullable<Text>,
+        image_blob_oid -> Nullable<Text>,
+        metadata_json -> Text,
+        published_by -> Text,
+        published_github_user_id -> BigInt,
+        published_at -> Timestamp,
+        yanked_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    modpack_version_dependencies (version_id, relation_kind, target_kind, target_id) {
+        version_id -> Text,
         relation_kind -> Text,
+        target_kind -> Text,
         target_id -> Text,
         position -> Integer,
     }
@@ -212,7 +238,9 @@ diesel::joinable!(mod_version_dependencies -> mod_versions (version_id));
 diesel::joinable!(registry_scans -> accounts (publisher_uuid));
 diesel::joinable!(registry_scan_entries -> registry_scans (scan_id));
 diesel::joinable!(modpacks -> accounts (publisher_uuid));
-diesel::joinable!(modpack_dependencies -> modpacks (modpack_id));
+diesel::joinable!(modpacks -> repositories (repository_id));
+diesel::joinable!(modpack_versions -> modpacks (modpack_id));
+diesel::joinable!(modpack_version_dependencies -> modpack_versions (version_id));
 diesel::joinable!(web_sessions -> accounts (account_uuid));
 diesel::joinable!(oauth_authorization_codes -> accounts (account_uuid));
 diesel::joinable!(app_tokens -> accounts (account_uuid));
@@ -228,7 +256,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     registry_scans,
     registry_scan_entries,
     modpacks,
-    modpack_dependencies,
+    modpack_versions,
+    modpack_version_dependencies,
     web_sessions,
     oauth_authorization_codes,
     app_tokens,

@@ -8,7 +8,6 @@ compile_error!("Enable one database backend: `sqlite` or `mysql`.");
 
 pub mod db;
 pub mod error;
-pub mod manifest;
 pub mod models;
 pub mod schema;
 mod validation;
@@ -17,13 +16,12 @@ mod ops;
 
 pub use db::{Database, DatabaseConfig};
 pub use error::{DatabaseError, Result};
-pub use manifest::ModpackManifest;
 pub use models::{
     Account, AppToken, CreateAccount, CreatePendingRegistration, CreateRegistryScan,
-    CreateRegistryScanEntry, DependencyInput, DependencyKind, GithubAccount, GithubOAuthState, Mod,
-    ModVersion, ModVersionDependency, Modpack, ModpackDependency, ModpackWithDependencies,
+    CreateRegistryScanEntry, GithubAccount, GithubOAuthState, Mod, ModVersion,
+    ModVersionDependency, Modpack, ModpackVersion, ModpackVersionDependency,
     OAuthAuthorizationCode, Pagination, PendingRegistration, PendingRegistrationVerification,
-    PublishModpack, PublishedMod, PublishedRegistryVersion, RegistryModState,
-    RegistryPublishResult, RegistryScan, RegistryScanEntry, RegistryScanWithEntries, Repository,
-    WebSession,
+    PublishedMod, PublishedModpack, PublishedRegistryVersion, RegistryModState,
+    RegistryModpackState, RegistryPublishResult, RegistryScan, RegistryScanEntry,
+    RegistryScanWithEntries, Repository, WebSession,
 };

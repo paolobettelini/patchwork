@@ -187,7 +187,7 @@ fn installation_complete_response() -> HttpResponse {
     <div class="mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
     <h1>GitHub App installed</h1>
     <p>The installation is complete. You can now scan repositories on Patchwork. Patchwork will verify repository access and your write permission during the scan.</p>
-    <a href="/profile">Return to Patchwork</a>
+    <a href="/">Return to Patchwork</a>
   </main>
 </body>
 </html>"#;

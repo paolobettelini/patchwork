@@ -2,19 +2,23 @@ use crate::{
     icons::{ArrowLeftIcon, DownloadIcon, GearIcon, PlayIcon, StopIcon, TrashIcon},
     model::{DependencyPage, LauncherModpack, PatchworkTaskStatus},
     tauri_bridge::{
-        create_modpack, delete_modpack, import_modpack, list_modpacks, listen_patchwork_console,
-        load_dependency_page, patchwork_task_status, select_icon_file, select_modpack_icon,
-        start_patchwork_action, stop_patchwork_action, update_profile_metadata,
+        create_modpack, delete_modpack, download_profile_updates, import_modpack, list_modpacks,
+        listen_patchwork_console, load_dependency_page, patchwork_task_status, refresh_profile,
+        select_icon_file, select_modpack_icon, start_patchwork_action, stop_patchwork_action,
+        update_profile_metadata,
     },
     terminal::ConsoleTerminal,
 };
 use leptos::prelude::*;
+use patchwork_ui::RefreshCwIcon;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
 mod dependencies;
+mod details;
 mod sidebar;
 
 use dependencies::DependencyPanel;
+use details::{DetailsPanel, format_downloads};
 use sidebar::ProfilesSidebar;
 
 #[component]
@@ -35,10 +39,13 @@ pub(crate) fn HomePage(
     let (delete_error, set_delete_error) = signal(None::<String>);
     let (dependency_page, set_dependency_page) = signal(None::<DependencyPage>);
     let (dependency_error, set_dependency_error) = signal(None::<String>);
-    let (active_detail_tab, set_active_detail_tab) = signal("dependencies");
-    let (compose_action, set_compose_action) = signal("compose-build");
+    let (active_detail_tab, set_active_detail_tab) = signal("details");
+    let (download_stage, set_download_stage) = signal(true);
+    let (compose_stage, set_compose_stage) = signal(true);
+    let (build_stage, set_build_stage) = signal(true);
     let (build_mode, set_build_mode) = signal("release");
     let (show_compose_menu, set_show_compose_menu) = signal(false);
+    let (profile_refresh_pending, set_profile_refresh_pending) = signal(false);
     let (task_running, set_task_running) = signal(false);
     let (running_action, set_running_action) = signal(None::<String>);
     let (is_runnable, set_is_runnable) = signal(false);
@@ -376,6 +383,10 @@ pub(crate) fn HomePage(
                                         <strong>{move || dependency_page.get().map(|page| page.distinct_dependency_count.to_string()).unwrap_or_else(|| "0".to_string())}</strong>
                                     </div>
                                     <div>
+                                        <span>"Version"</span>
+                                        <strong>{move || dependency_page.get().map(|page| page.version).or_else(|| selected().map(|modpack| modpack.version)).unwrap_or_else(|| "-".to_string())}</strong>
+                                    </div>
+                                    <div>
                                         <span>"Downloads"</span>
                                         <strong>
                                             {move || {
@@ -383,11 +394,15 @@ pub(crate) fn HomePage(
                                                     .get()
                                                     .is_some_and(|page| page.kind != "profile")
                                                 {
-                                                    "—".to_string()
+                                                    dependency_page
+                                                        .get()
+                                                        .and_then(|page| page.downloads)
+                                                        .map(|downloads| format_downloads(Some(downloads)))
+                                                        .unwrap_or_else(|| "-".to_owned())
                                                 } else {
                                                     selected()
                                                         .map(|modpack| modpack.downloads)
-                                                        .unwrap_or_else(|| "—".to_string())
+                                                        .unwrap_or_else(|| "-".to_string())
                                                 }
                                             }}
                                         </strong>
@@ -398,6 +413,56 @@ pub(crate) fn HomePage(
                                         Some(page) if page.editable_profile => {
                                             view! {
                                                 <div class="profile-actions">
+                                                    <button
+                                                        type="button"
+                                                        class="profile-refresh-action"
+                                                        title="Refresh profile"
+                                                        aria-label="Refresh profile"
+                                                        disabled=move || profile_refresh_pending.get() || task_running.get()
+                                                        on:click=move |_| {
+                                                            if let Some(page) = dependency_page.get().filter(|page| page.editable_profile) {
+                                                                refresh_selected_profile(
+                                                                    page.id,
+                                                                    set_modpacks,
+                                                                    set_dependency_page,
+                                                                    set_profile_refresh_pending,
+                                                                    set_patchwork_action_error,
+                                                                );
+                                                            }
+                                                        }
+                                                    >
+                                                        {move || if profile_refresh_pending.get() {
+                                                            view! { <span class="button-spinner compact" aria-hidden="true"></span> }.into_any()
+                                                        } else {
+                                                            view! { <RefreshCwIcon /> }.into_any()
+                                                        }}
+                                                    </button>
+                                                    <Show when=move || {
+                                                        current_profile_updates(dependency_page, modpacks) > 0
+                                                    }>
+                                                        <button
+                                                            type="button"
+                                                            class="profile-update-action"
+                                                            disabled=move || profile_refresh_pending.get() || task_running.get()
+                                                            on:click=move |_| {
+                                                                if let Some(page) = dependency_page.get().filter(|page| page.editable_profile) {
+                                                                    download_selected_profile_updates(
+                                                                        page.id,
+                                                                        set_modpacks,
+                                                                        set_dependency_page,
+                                                                        set_profile_refresh_pending,
+                                                                        set_patchwork_action_error,
+                                                                    );
+                                                                }
+                                                            }
+                                                        >
+                                                            <DownloadIcon />
+                                                            <span>{move || format!(
+                                                                "Download updates ({})",
+                                                                current_profile_updates(dependency_page, modpacks)
+                                                            )}</span>
+                                                        </button>
+                                                    </Show>
                                                     <button
                                                         type="button"
                                                         class=move || {
@@ -448,17 +513,32 @@ pub(crate) fn HomePage(
                                                     <div class="compose-action-group">
                                                         <button
                                                             type="button"
-                                                            class=move || if task_running.get() {
+                                                            class=move || if task_running.get() || pipeline_action(
+                                                                download_stage.get(),
+                                                                compose_stage.get(),
+                                                                build_stage.get(),
+                                                            ).is_none() {
                                                                 "primary-action compose-primary-action disabled-action"
                                                             } else {
                                                                 "primary-action compose-primary-action"
                                                             }
-                                                            disabled=move || task_running.get()
+                                                            disabled=move || task_running.get() || pipeline_action(
+                                                                download_stage.get(),
+                                                                compose_stage.get(),
+                                                                build_stage.get(),
+                                                            ).is_none()
                                                             on:click=move |_| {
-                                                                if let Some(page) = dependency_page.get() {
+                                                                if let (Some(page), Some(action)) = (
+                                                                    dependency_page.get(),
+                                                                    pipeline_action(
+                                                                        download_stage.get(),
+                                                                        compose_stage.get(),
+                                                                        build_stage.get(),
+                                                                    ),
+                                                                ) {
                                                                     start_selected_patchwork_action(
                                                                         page.id,
-                                                                        compose_action.get(),
+                                                                        action,
                                                                         build_mode.get(),
                                                                         set_console_output,
                                                                         set_task_running,
@@ -477,7 +557,11 @@ pub(crate) fn HomePage(
                                                                     view! { <img class="sew-action-icon" src="/sew.png" alt="" /> }.into_any()
                                                                 }
                                                             }}
-                                                            <span>{move || compose_action_label(compose_action.get())}</span>
+                                                            <span>{move || pipeline_action_label(
+                                                                download_stage.get(),
+                                                                compose_stage.get(),
+                                                                build_stage.get(),
+                                                            )}</span>
                                                         </button>
                                                         <div class="compose-selector">
                                                             <button
@@ -491,24 +575,53 @@ pub(crate) fn HomePage(
                                                             <Show when=move || show_compose_menu.get()>
                                                                 <div class="compose-selector-menu">
                                                                     <div class="compose-selector-section">
-                                                                        <span>"Action"</span>
-                                                                        <For
-                                                                            each=move || compose_action_alternatives(compose_action.get())
-                                                                            key=|mode| *mode
-                                                                            children=move |mode| {
-                                                                                view! {
-                                                                                    <button
-                                                                                        type="button"
-                                                                                        on:click=move |_| {
-                                                                                            set_compose_action.set(mode);
-                                                                                            set_show_compose_menu.set(false);
-                                                                                        }
-                                                                                    >
-                                                                                        {compose_action_label(mode)}
-                                                                                    </button>
+                                                                        <span>"Pipeline"</span>
+                                                                        <label class="compose-stage-option">
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                prop:checked=move || download_stage.get()
+                                                                                on:change=move |event| {
+                                                                                    let checked = event_target_checked(&event);
+                                                                                    set_download_stage.set(checked);
+                                                                                    if !checked {
+                                                                                        set_compose_stage.set(false);
+                                                                                        set_build_stage.set(false);
+                                                                                    }
                                                                                 }
-                                                                            }
-                                                                        />
+                                                                            />
+                                                                            <span>"Download"</span>
+                                                                        </label>
+                                                                        <label class="compose-stage-option">
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                prop:checked=move || compose_stage.get()
+                                                                                on:change=move |event| {
+                                                                                    let checked = event_target_checked(&event);
+                                                                                    set_compose_stage.set(checked);
+                                                                                    if checked {
+                                                                                        set_download_stage.set(true);
+                                                                                    } else {
+                                                                                        set_build_stage.set(false);
+                                                                                    }
+                                                                                }
+                                                                            />
+                                                                            <span>"Compose"</span>
+                                                                        </label>
+                                                                        <label class="compose-stage-option">
+                                                                            <input
+                                                                                type="checkbox"
+                                                                                prop:checked=move || build_stage.get()
+                                                                                on:change=move |event| {
+                                                                                    let checked = event_target_checked(&event);
+                                                                                    set_build_stage.set(checked);
+                                                                                    if checked {
+                                                                                        set_download_stage.set(true);
+                                                                                        set_compose_stage.set(true);
+                                                                                    }
+                                                                                }
+                                                                            />
+                                                                            <span>"Build"</span>
+                                                                        </label>
                                                                     </div>
                                                                     <div class="compose-selector-section separated">
                                                                         <span>"Mode"</span>
@@ -555,6 +668,13 @@ pub(crate) fn HomePage(
                         <div class="detail-tabs" aria-label="Modpack detail tabs">
                             <button
                                 type="button"
+                                class=move || detail_tab_class(active_detail_tab.get() == "details")
+                                on:click=move |_| set_active_detail_tab.set("details")
+                            >
+                                "Details"
+                            </button>
+                            <button
+                                type="button"
                                 class=move || detail_tab_class(active_detail_tab.get() == "dependencies")
                                 on:click=move |_| set_active_detail_tab.set("dependencies")
                             >
@@ -569,22 +689,21 @@ pub(crate) fn HomePage(
                             </button>
                         </div>
 
-                        <Show
-                            when=move || active_detail_tab.get() == "dependencies"
-                            fallback=move || view! {
-                                <ConsoleTerminal dependency_page build_mode />
-                            }
-                        >
-                            <DependencyPanel
-                                page=dependency_page
-                                error=dependency_error
-                                action_error=patchwork_action_error
-                                set_page=set_dependency_page
-                                set_error=set_dependency_error
-                                current_page=dependency_page
-                                set_history=set_navigation_history
-                            />
-                        </Show>
+                        {move || match active_detail_tab.get() {
+                            "details" => view! { <DetailsPanel page=dependency_page /> }.into_any(),
+                            "dependencies" => view! {
+                                <DependencyPanel
+                                    page=dependency_page
+                                    error=dependency_error
+                                    action_error=patchwork_action_error
+                                    set_page=set_dependency_page
+                                    set_error=set_dependency_error
+                                    current_page=dependency_page
+                                    set_history=set_navigation_history
+                                />
+                            }.into_any(),
+                            _ => view! { <ConsoleTerminal dependency_page build_mode /> }.into_any(),
+                        }}
                     </section>
                 </Show>
             </main>
@@ -1108,6 +1227,90 @@ async fn refresh_modpacks_after_delete(
     }
 }
 
+fn current_profile_updates(
+    dependency_page: ReadSignal<Option<DependencyPage>>,
+    modpacks: ReadSignal<Vec<LauncherModpack>>,
+) -> usize {
+    let Some(profile_id) = dependency_page
+        .get()
+        .filter(|page| page.editable_profile)
+        .map(|page| page.id)
+    else {
+        return 0;
+    };
+    modpacks
+        .get()
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .map(|profile| profile.updates_available)
+        .unwrap_or(0)
+}
+
+fn refresh_selected_profile(
+    profile_id: String,
+    set_modpacks: WriteSignal<Vec<LauncherModpack>>,
+    set_dependency_page: WriteSignal<Option<DependencyPage>>,
+    set_pending: WriteSignal<bool>,
+    set_error: WriteSignal<Option<String>>,
+) {
+    set_pending.set(true);
+    set_error.set(None);
+    leptos::task::spawn_local(async move {
+        match refresh_profile(&profile_id).await {
+            Ok(profile) => {
+                replace_launcher_profile(set_modpacks, profile);
+                if let Ok(page) = load_dependency_page("profile", &profile_id).await {
+                    set_dependency_page.set(Some(page));
+                }
+            }
+            Err(error) => set_error.set(Some(js_error_to_string(error))),
+        }
+        set_pending.set(false);
+    });
+}
+
+fn download_selected_profile_updates(
+    profile_id: String,
+    set_modpacks: WriteSignal<Vec<LauncherModpack>>,
+    set_dependency_page: WriteSignal<Option<DependencyPage>>,
+    set_pending: WriteSignal<bool>,
+    set_error: WriteSignal<Option<String>>,
+) {
+    set_pending.set(true);
+    set_error.set(None);
+    leptos::task::spawn_local(async move {
+        match download_profile_updates(&profile_id).await {
+            Ok(result) => {
+                replace_launcher_profile(set_modpacks, result.profile);
+                if !result.report.errors.is_empty() {
+                    set_error.set(Some(format!(
+                        "Some updates could not be downloaded:\n{}",
+                        result.report.errors.join("\n")
+                    )));
+                }
+                if let Ok(page) = load_dependency_page("profile", &profile_id).await {
+                    set_dependency_page.set(Some(page));
+                }
+            }
+            Err(error) => set_error.set(Some(js_error_to_string(error))),
+        }
+        set_pending.set(false);
+    });
+}
+
+fn replace_launcher_profile(
+    set_modpacks: WriteSignal<Vec<LauncherModpack>>,
+    profile: LauncherModpack,
+) {
+    set_modpacks.update(|profiles| {
+        if let Some(current) = profiles.iter_mut().find(|current| current.id == profile.id) {
+            *current = profile;
+        } else {
+            profiles.push(profile);
+        }
+    });
+}
+
 fn page_label(page: &DependencyPage) -> &'static str {
     match page.kind.as_str() {
         "mod" => "Mod",
@@ -1137,17 +1340,29 @@ fn run_button_class(runnable: bool, task_running: bool, running_run: bool) -> &'
 
 fn compose_action_label(mode: &'static str) -> &'static str {
     match mode {
+        "download" => "Download",
         "compose" => "Compose",
         "build" => "Build",
         _ => "Compose & Build",
     }
 }
 
-fn compose_action_alternatives(mode: &'static str) -> Vec<&'static str> {
-    ["compose-build", "compose", "build"]
-        .into_iter()
-        .filter(|candidate| *candidate != mode)
-        .collect()
+fn pipeline_action(download: bool, compose: bool, build: bool) -> Option<&'static str> {
+    if build {
+        Some("compose-build")
+    } else if compose {
+        Some("compose")
+    } else if download {
+        Some("download")
+    } else {
+        None
+    }
+}
+
+fn pipeline_action_label(download: bool, compose: bool, build: bool) -> &'static str {
+    pipeline_action(download, compose, build)
+        .map(compose_action_label)
+        .unwrap_or("Select stages")
 }
 
 fn build_mode_label(mode: &'static str) -> &'static str {

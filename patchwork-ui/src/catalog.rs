@@ -2,60 +2,45 @@ use std::collections::HashSet;
 
 use leptos::prelude::*;
 use patchwork_registry_types::{
-    RegistryDependencyKind, RegistryPublishRequest, RegistryScan, RegistryScanEntry,
-    RegistryScanPhase, RegistryScanProgress, RegistryScanRequest, RegistryScanStatus,
+    RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
+    RegistryBrowseSource, RegistryDependencyKind, RegistryProfileOption, RegistryProjectKind,
+    RegistryProjectRef, RegistryPublishRequest, RegistryScan, RegistryScanEntry, RegistryScanPhase,
+    RegistryScanProgress, RegistryScanRequest, RegistryScanStatus, is_generated_mod_id,
 };
 
 use crate::icons::{SearchIcon, UploadIcon};
 
-#[derive(Clone, Copy)]
-struct CatalogItem {
-    name: &'static str,
-    kind: &'static str,
-    summary: &'static str,
-    version: &'static str,
-    downloads: &'static str,
-    accent: &'static str,
-}
-
-const BROWSE_ITEMS: [CatalogItem; 4] = [
-    CatalogItem {
-        name: "Inventory Loom",
-        kind: "Mod",
-        summary: "Shared inventory primitives for client and server mods.",
-        version: "1.21.4",
-        downloads: "18.6K",
-        accent: "#02a9a9",
-    },
-    CatalogItem {
-        name: "Copper Trails",
-        kind: "Modpack",
-        summary: "A compact exploration pack stitched around lightweight worldgen.",
-        version: "1.21.x",
-        downloads: "9.2K",
-        accent: "#fdb22c",
-    },
-    CatalogItem {
-        name: "UI Stitch",
-        kind: "API",
-        summary: "Composable menu surfaces and interaction contracts.",
-        version: "0.7",
-        downloads: "31.4K",
-        accent: "#6268c8",
-    },
-    CatalogItem {
-        name: "Redstone Cloth",
-        kind: "Asset pack",
-        summary: "Texture and sound assets for technical modpacks.",
-        version: "2.0",
-        downloads: "6.8K",
-        accent: "#fd614e",
-    },
-];
-
 #[component]
-pub fn BrowsePage(#[prop(default = false)] allow_downloads: bool) -> impl IntoView {
-    view! { <CatalogPage allow_downloads=allow_downloads /> }
+pub fn BrowsePage(
+    results: Signal<Vec<RegistryBrowseProject>>,
+    profiles: Signal<Vec<RegistryProfileOption>>,
+    pending: Signal<bool>,
+    action_pending: Signal<Option<String>>,
+    error: Signal<Option<String>>,
+    warnings: Signal<Vec<String>>,
+    notice: Signal<Option<String>>,
+    #[prop(default = false)] allow_downloads: bool,
+    on_search: Callback<RegistryBrowseRequest>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_download_profile: Callback<RegistryBrowseProject>,
+    on_add_to_profile: Callback<RegistryAddToProfileRequest>,
+) -> impl IntoView {
+    view! {
+        <CatalogPage
+            results
+            profiles
+            pending
+            action_pending
+            error
+            warnings
+            notice
+            allow_downloads
+            on_search
+            on_open_project
+            on_download_profile
+            on_add_to_profile
+        />
+    }
 }
 
 #[component]
@@ -71,6 +56,7 @@ pub fn UploadPage(
     on_connect_github: Callback<()>,
     on_scan: Callback<RegistryScanRequest>,
     on_publish: Callback<RegistryPublishRequest>,
+    on_open_project: Callback<RegistryProjectRef>,
 ) -> impl IntoView {
     let (repository_url, set_repository_url) = signal(String::new());
     let (base_path, set_base_path) = signal(String::new());
@@ -128,7 +114,7 @@ pub fn UploadPage(
                 <div>
                     <p class="catalog-kicker">"Publisher console"</p>
                     <h1>"Upload"</h1>
-                    <p>"Publish mod versions from a GitHub repository."</p>
+                    <p>"Publish mod and modpack versions from a GitHub repository."</p>
                 </div>
             </section>
 
@@ -169,9 +155,9 @@ pub fn UploadPage(
                                 />
                             </label>
                             <label class="upload-field">
-                                <span>"Subdirectory" <small>"Optional"</small></span>
+                                <span>"Subdirectory or modpack file" <small>"Optional"</small></span>
                                 <input
-                                    placeholder="mods/my-mod"
+                                    placeholder="mods or modpacks/example.toml"
                                     prop:value=move || base_path.get()
                                     on:input=move |event| set_base_path.set(event_target_value(&event))
                                 />
@@ -219,6 +205,7 @@ pub fn UploadPage(
                             progress
                             selected_entries
                             set_selected_entries
+                            on_open_project
                         />
                     })}
 
@@ -228,6 +215,7 @@ pub fn UploadPage(
                             selected_entries
                             set_selected_entries
                             pending
+                            on_open_project
                             on_publish=Callback::new(move |()| publish(()))
                         />
                     })}
@@ -268,6 +256,7 @@ fn ScanPreview(
     selected_entries: ReadSignal<HashSet<String>>,
     set_selected_entries: WriteSignal<HashSet<String>>,
     pending: Signal<bool>,
+    on_open_project: Callback<RegistryProjectRef>,
     on_publish: Callback<()>,
 ) -> impl IntoView {
     let repository_name = format!("{}/{}", scan.repository.owner, scan.repository.name);
@@ -311,6 +300,7 @@ fn ScanPreview(
                             selected_entries
                             set_selected_entries
                             interaction_disabled=false
+                            on_open_project
                         />
                     }
                 />
@@ -348,6 +338,7 @@ fn ScanProgressPanel(
     progress: RegistryScanProgress,
     selected_entries: ReadSignal<HashSet<String>>,
     set_selected_entries: WriteSignal<HashSet<String>>,
+    on_open_project: Callback<RegistryProjectRef>,
 ) -> impl IntoView {
     let phase = progress.phase;
     let completed = progress.completed;
@@ -377,6 +368,7 @@ fn ScanProgressPanel(
                             selected_entries
                             set_selected_entries
                             interaction_disabled=true
+                            on_open_project
                         />
                     }
                 />
@@ -393,7 +385,7 @@ fn ScanProgressPanel(
                     <span>{scan_progress_count(phase, completed, total)}</span>
                 </div>
                 <span>{format!(
-                    "{} mod{} ready",
+                    "{} project{} ready",
                     entries_count,
                     if entries_count == 1 { "" } else { "s" },
                 )}</span>
@@ -412,13 +404,20 @@ fn ScanEntryCard(
     selected_entries: ReadSignal<HashSet<String>>,
     set_selected_entries: WriteSignal<HashSet<String>>,
     interaction_disabled: bool,
+    on_open_project: Callback<RegistryProjectRef>,
 ) -> impl IntoView {
     let publishable = entry.is_publishable();
+    let generated_entry =
+        entry.project_kind == RegistryProjectKind::Mod && is_generated_mod_id(&entry.project_id);
     let entry_id_for_checked = entry.entry_id.clone();
     let entry_id_for_change = entry.entry_id.clone();
     let card_class = format!("scan-entry {}", status_class(entry.status));
     let tree_oid = entry.source_tree_oid.clone();
     let manifest_oid = entry.manifest_blob_oid.clone();
+    let entry_target = RegistryProjectRef {
+        project_kind: entry.project_kind,
+        project_id: entry.project_id.clone(),
+    };
     let dependencies = entry.dependencies.clone();
     let warnings = entry.warnings.clone();
     let errors = entry.errors.clone();
@@ -431,11 +430,31 @@ fn ScanEntryCard(
                 <div>
                     <For
                         each=move || dependencies.clone()
-                        key=|dependency| (dependency.kind, dependency.target_id.clone())
-                        children=move |dependency| view! {
-                            <span class=if dependency.available { "dependency-chip" } else { "dependency-chip missing" }>
-                                {dependency_kind(dependency.kind)} " · " {dependency.target_id}
-                            </span>
+                        key=|dependency| (
+                            dependency.kind,
+                            dependency.target_kind,
+                            dependency.target_id.clone(),
+                        )
+                        children=move |dependency| {
+                            let generated = dependency.target_kind == RegistryProjectKind::Mod
+                                && is_generated_mod_id(&dependency.target_id);
+                            let clickable = dependency.available && !generated;
+                            let target = RegistryProjectRef {
+                                project_kind: dependency.target_kind,
+                                project_id: dependency.target_id.clone(),
+                            };
+                            view! {
+                            <button
+                                type="button"
+                                class=if generated { "dependency-chip generated" } else if dependency.available { "dependency-chip" } else { "dependency-chip missing" }
+                                disabled=!clickable
+                                on:click=move |_| on_open_project.run(target.clone())
+                            >
+                                {dependency_kind(dependency.kind)} " · "
+                                {dependency_target(dependency.target_kind, &dependency.target_id)}
+                                {generated.then_some(" · generated during compose")}
+                            </button>
+                            }
                         }
                     />
                 </div>
@@ -449,7 +468,7 @@ fn ScanEntryCard(
             <div class="scan-entry-select">
                 <input
                     type="checkbox"
-                    aria-label=format!("Select {} {}", entry.mod_id, entry.version)
+                    aria-label=format!("Select {} {}", entry.project_id, entry.version)
                     disabled=!publishable || interaction_disabled
                     prop:checked=move || selected_entries.get().contains(&entry_id_for_checked)
                     on:change=move |event| {
@@ -467,11 +486,22 @@ fn ScanEntryCard(
             <div class="scan-entry-body">
                 <header class="scan-entry-heading">
                     <div>
-                        <h3>{entry.title}</h3>
-                        <p><code>{entry.mod_id}</code> <span>{entry.version}</span></p>
+                        <button
+                            type="button"
+                            class="scan-project-link"
+                            disabled=generated_entry
+                            on:click=move |_| on_open_project.run(entry_target.clone())
+                        >
+                            <h3>{entry.title}</h3>
+                        </button>
+                        <p>
+                            <span class="scan-project-kind">{project_kind(entry.project_kind)}</span>
+                            <code>{entry.project_id}</code>
+                            <span>{entry.version}</span>
+                        </p>
                     </div>
                     <span class=format!("scan-status {}", status_class(entry.status))>
-                        {status_label(entry.status)}
+                        {status_label(entry.status, entry.project_kind)}
                     </span>
                 </header>
 
@@ -504,8 +534,8 @@ fn scan_phase_label(phase: RegistryScanPhase) -> &'static str {
         RegistryScanPhase::Queued => "Queued",
         RegistryScanPhase::Authorizing => "Checking repository access",
         RegistryScanPhase::IndexingRepository => "Reading repository tree",
-        RegistryScanPhase::FetchingManifests => "Downloading Cargo manifests",
-        RegistryScanPhase::ValidatingMods => "Validating mods",
+        RegistryScanPhase::FetchingManifests => "Downloading manifests",
+        RegistryScanPhase::ValidatingProjects => "Validating projects",
         RegistryScanPhase::Persisting => "Saving scan preview",
         RegistryScanPhase::Complete => "Scan complete",
         RegistryScanPhase::Failed => "Scan failed",
@@ -516,7 +546,7 @@ fn scan_progress_count(phase: RegistryScanPhase, completed: u32, total: Option<u
     let unit = match phase {
         RegistryScanPhase::IndexingRepository => "directories",
         RegistryScanPhase::FetchingManifests => "manifests",
-        RegistryScanPhase::ValidatingMods => "mods",
+        RegistryScanPhase::ValidatingProjects => "projects",
         RegistryScanPhase::Persisting => "preview",
         _ => "",
     };
@@ -527,9 +557,12 @@ fn scan_progress_count(phase: RegistryScanPhase, completed: u32, total: Option<u
     }
 }
 
-fn status_label(status: RegistryScanStatus) -> &'static str {
+fn status_label(status: RegistryScanStatus, project_kind: RegistryProjectKind) -> &'static str {
     match status {
-        RegistryScanStatus::NewMod => "NEW MOD",
+        RegistryScanStatus::NewMod => match project_kind {
+            RegistryProjectKind::Mod => "NEW MOD",
+            RegistryProjectKind::Modpack => "NEW MODPACK",
+        },
         RegistryScanStatus::NewVersion => "NEW VERSION",
         RegistryScanStatus::Unchanged => "ALREADY PUBLISHED",
         RegistryScanStatus::VersionConflict => "VERSION CONFLICT",
@@ -552,6 +585,24 @@ fn dependency_kind(kind: RegistryDependencyKind) -> &'static str {
         RegistryDependencyKind::Init => "init",
         RegistryDependencyKind::Run => "run",
         RegistryDependencyKind::Ownership => "ownership",
+        RegistryDependencyKind::Provides => "provides",
+        RegistryDependencyKind::Mod => "mod",
+        RegistryDependencyKind::Modpack => "modpack",
+        RegistryDependencyKind::Ignore => "ignore",
+    }
+}
+
+fn project_kind(kind: RegistryProjectKind) -> &'static str {
+    match kind {
+        RegistryProjectKind::Mod => "MOD",
+        RegistryProjectKind::Modpack => "MODPACK",
+    }
+}
+
+fn dependency_target(kind: RegistryProjectKind, id: &str) -> String {
+    match kind {
+        RegistryProjectKind::Mod => id.to_owned(),
+        RegistryProjectKind::Modpack => format!("modpack/{id}"),
     }
 }
 
@@ -564,7 +615,37 @@ fn short_oid(oid: &str) -> String {
 }
 
 #[component]
-pub fn CatalogPage(#[prop(default = false)] allow_downloads: bool) -> impl IntoView {
+pub fn CatalogPage(
+    results: Signal<Vec<RegistryBrowseProject>>,
+    profiles: Signal<Vec<RegistryProfileOption>>,
+    pending: Signal<bool>,
+    action_pending: Signal<Option<String>>,
+    error: Signal<Option<String>>,
+    warnings: Signal<Vec<String>>,
+    notice: Signal<Option<String>>,
+    allow_downloads: bool,
+    on_search: Callback<RegistryBrowseRequest>,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_download_profile: Callback<RegistryBrowseProject>,
+    on_add_to_profile: Callback<RegistryAddToProfileRequest>,
+) -> impl IntoView {
+    let (query, set_query) = signal(String::new());
+    let (include_mods, set_include_mods) = signal(true);
+    let (include_modpacks, set_include_modpacks) = signal(true);
+    let submit = move |event: leptos::ev::SubmitEvent| {
+        event.prevent_default();
+        if pending.get_untracked()
+            || (!include_mods.get_untracked() && !include_modpacks.get_untracked())
+        {
+            return;
+        }
+        on_search.run(RegistryBrowseRequest {
+            query: query.get_untracked().trim().to_owned(),
+            include_mods: include_mods.get_untracked(),
+            include_modpacks: include_modpacks.get_untracked(),
+        });
+    };
+
     view! {
         <div class="catalog-layout">
             <section class="catalog-hero">
@@ -574,50 +655,252 @@ pub fn CatalogPage(#[prop(default = false)] allow_downloads: bool) -> impl IntoV
                     <p>"Explore Patchwork mods, APIs, support packages and complete modpacks."</p>
                 </div>
 
-                <div class="catalog-search">
+                <form class="catalog-search" on:submit=submit>
                     <SearchIcon />
-                    <input type="search" placeholder="Search mods and modpacks" aria-label="Search mods and modpacks" />
-                </div>
+                    <input
+                        type="search"
+                        placeholder="Search by keyword or ID"
+                        aria-label="Search mods and modpacks"
+                        prop:value=move || query.get()
+                        on:input=move |event| set_query.set(event_target_value(&event))
+                    />
+                    <button
+                        type="submit"
+                        class="catalog-search-action"
+                        disabled=move || pending.get() || (!include_mods.get() && !include_modpacks.get())
+                    >
+                        {move || if pending.get() { "Searching..." } else { "Search" }}
+                    </button>
+                </form>
             </section>
 
-            <section class="catalog-toolbar" aria-label="Catalogue filters">
-                <button type="button" class="catalog-filter active">"Featured"</button>
-                <button type="button" class="catalog-filter">"Mods"</button>
-                <button type="button" class="catalog-filter">"Modpacks"</button>
-                <button type="button" class="catalog-filter">"APIs"</button>
-            </section>
+            <div class="catalog-browser">
+                <aside class="catalog-sidebar" aria-label="Browse filters">
+                    <strong>"Project type"</strong>
+                    <label class="catalog-check-filter">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || include_mods.get()
+                            on:change=move |event| set_include_mods.set(event_target_checked(&event))
+                        />
+                        <span>"Mods"</span>
+                    </label>
+                    <label class="catalog-check-filter">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || include_modpacks.get()
+                            on:change=move |event| set_include_modpacks.set(event_target_checked(&event))
+                        />
+                        <span>"Modpacks"</span>
+                    </label>
+                </aside>
 
-            <section class="catalog-grid">
-                <For
-                    each=move || BROWSE_ITEMS.to_vec()
-                    key=|item| item.name
-                    children=move |item| view! {
-                        <article class="catalog-item">
-                            <span class="catalog-swatch" style=format!("--item-accent: {}", item.accent)></span>
-                            <div class="catalog-item-body">
-                                <div class="catalog-item-heading">
-                                    <div>
-                                        <h2>{item.name}</h2>
-                                        <p>{item.summary}</p>
-                                    </div>
-                                    <span class="catalog-kind">{item.kind}</span>
-                                </div>
-
-                                <div class="catalog-meta">
-                                    <span>{item.version}</span>
-                                    <span>{item.downloads} " downloads"</span>
-                                </div>
-
-                                <div class="catalog-actions">
-                                    <button type="button" class="catalog-secondary-action">
-                                        {if allow_downloads { "Download" } else { "View" }}
-                                    </button>
-                                </div>
+                <section class="catalog-results" aria-live="polite">
+                    <Show when=move || error.get().is_some()>
+                        <p class="catalog-feedback error">{move || error.get().unwrap_or_default()}</p>
+                    </Show>
+                    <For
+                        each=move || warnings.get()
+                        key=|warning| warning.clone()
+                        children=move |warning| view! { <p class="catalog-feedback warning">{warning}</p> }
+                    />
+                    <Show when=move || notice.get().is_some()>
+                        <p class="catalog-feedback success">{move || notice.get().unwrap_or_default()}</p>
+                    </Show>
+                    <Show
+                        when=move || pending.get() || !results.get().is_empty()
+                        fallback=move || view! {
+                            <div class="catalog-empty">
+                                <SearchIcon />
+                                <strong>"No projects found"</strong>
                             </div>
-                        </article>
-                    }
-                />
-            </section>
+                        }
+                    >
+                        <Show when=move || pending.get() && results.get().is_empty()>
+                            <div class="catalog-loading">
+                                <span></span>
+                                <strong>"Searching registries..."</strong>
+                            </div>
+                        </Show>
+                        <div class="catalog-grid">
+                            <For
+                                each=move || results.get()
+                                key=|project| (
+                                    project.project_kind,
+                                    project.project_id.clone(),
+                                    project.source,
+                                    project.source_label.clone(),
+                                    project.local_manifest_path.clone().or(project.repository_path.clone()),
+                                    project.version.clone(),
+                                )
+                                children=move |project| view! {
+                                    <CatalogProject
+                                        project
+                                        profiles
+                                        action_pending
+                                        allow_downloads
+                                        on_open_project
+                                        on_download_profile
+                                        on_add_to_profile
+                                    />
+                                }
+                            />
+                        </div>
+                    </Show>
+                </section>
+            </div>
         </div>
+    }
+}
+
+#[component]
+fn CatalogProject(
+    project: RegistryBrowseProject,
+    profiles: Signal<Vec<RegistryProfileOption>>,
+    action_pending: Signal<Option<String>>,
+    allow_downloads: bool,
+    on_open_project: Callback<RegistryProjectRef>,
+    on_download_profile: Callback<RegistryBrowseProject>,
+    on_add_to_profile: Callback<RegistryAddToProfileRequest>,
+) -> impl IntoView {
+    let (project_for_download, _) = signal(project.clone());
+    let (project_for_profile, _) = signal(project.clone());
+    let (project_ref, _) = signal(project.project_ref());
+    let (show_profile_menu, set_show_profile_menu) = signal(false);
+    let (action_key, _) = signal(browse_action_key(&project));
+    let is_modpack = project.project_kind == RegistryProjectKind::Modpack;
+    let generated = project.project_kind == RegistryProjectKind::Mod
+        && is_generated_mod_id(&project.project_id);
+    let accent = if is_modpack { "#fdb22c" } else { "#02a9a9" };
+    let kind = if is_modpack { "Modpack" } else { "Mod" };
+    let source = match project.source {
+        RegistryBrowseSource::Remote => format!("GitHub · {}", project.source_label),
+        RegistryBrowseSource::Local => format!("Local · {}", project.source_label),
+    };
+    let is_remote = project.source == RegistryBrowseSource::Remote;
+    let description = if project.description.trim().is_empty() {
+        format!("Patchwork {} {}", kind.to_lowercase(), project.project_id)
+    } else {
+        project.description.clone()
+    };
+    let image_url = project.image_url.clone();
+    let title = project.title.clone();
+    let project_id = project.project_id.clone();
+    let version = project.version.clone();
+    let downloads = project.downloads;
+
+    view! {
+        <article class="catalog-item" style=format!("--item-accent: {accent}")>
+            <span class="catalog-swatch"></span>
+            <div class="catalog-item-body">
+                <div class="catalog-item-heading">
+                    <div class="catalog-project-title">
+                        {image_url.map(|image_url| view! {
+                            <img src=image_url alt="" loading="lazy" />
+                        })}
+                        <div>
+                            <button
+                                type="button"
+                                class="catalog-title-button"
+                                disabled=generated || (allow_downloads && !is_remote)
+                                on:click=move |_| on_open_project.run(project_ref.get_untracked())
+                            >
+                                <h2>{title}</h2>
+                            </button>
+                            <code>{project_id}</code>
+                            <p>{description}</p>
+                        </div>
+                    </div>
+                    <span class="catalog-kind">{kind}</span>
+                </div>
+
+                <div class="catalog-meta">
+                    <span>{format!("v{version}")}</span>
+                    <span>{if is_remote {
+                        format!("{} downloads", format_downloads(downloads))
+                    } else {
+                        "Downloads -".to_owned()
+                    }}</span>
+                    <span>{source}</span>
+                </div>
+
+                <Show when=move || allow_downloads && !generated>
+                    <div class="catalog-actions catalog-download-actions">
+                        <Show when=move || is_modpack>
+                            <button
+                                type="button"
+                                class="catalog-secondary-action"
+                                disabled=move || action_pending.get().as_deref() == Some(action_key.get().as_str())
+                                on:click=move |_| on_download_profile.run(project_for_download.get_untracked())
+                            >
+                                "Download as profile"
+                            </button>
+                        </Show>
+                        <Show
+                            when=move || !profiles.get().is_empty()
+                            fallback=move || view! { <span class="catalog-no-profiles">"No profiles available"</span> }
+                        >
+                            <div class="catalog-profile-action">
+                                <button
+                                    type="button"
+                                    class="catalog-secondary-action"
+                                    aria-expanded=move || show_profile_menu.get().to_string()
+                                    disabled=move || action_pending.get().as_deref() == Some(action_key.get().as_str())
+                                    on:click=move |_| set_show_profile_menu.update(|show| *show = !*show)
+                                >
+                                    "Add to existing profile"
+                                </button>
+                                <Show when=move || show_profile_menu.get()>
+                                    <div class="catalog-profile-menu" role="menu">
+                                        <For
+                                            each=move || profiles.get()
+                                            key=|profile| profile.id.clone()
+                                            children=move |profile| {
+                                                let profile_id = profile.id.clone();
+                                                view! {
+                                                    <button
+                                                        type="button"
+                                                        role="menuitem"
+                                                        on:click=move |_| {
+                                                            set_show_profile_menu.set(false);
+                                                            on_add_to_profile.run(RegistryAddToProfileRequest {
+                                                                project: project_ref.get_untracked(),
+                                                                selected_project: Some(project_for_profile.get_untracked()),
+                                                                profile_id: profile_id.clone(),
+                                                            });
+                                                        }
+                                                    >
+                                                        <strong>{profile.name}</strong>
+                                                        <code>{profile.id}</code>
+                                                    </button>
+                                                }
+                                            }
+                                        />
+                                    </div>
+                                </Show>
+                            </div>
+                        </Show>
+                    </div>
+                </Show>
+            </div>
+        </article>
+    }
+}
+
+fn browse_action_key(project: &RegistryBrowseProject) -> String {
+    format!(
+        "{}:{}",
+        project.project_kind.route_segment(),
+        project.project_id
+    )
+}
+
+fn format_downloads(downloads: i64) -> String {
+    if downloads >= 1_000_000 {
+        format!("{:.1}M", downloads as f64 / 1_000_000.0)
+    } else if downloads >= 1_000 {
+        format!("{:.1}K", downloads as f64 / 1_000.0)
+    } else {
+        downloads.to_string()
     }
 }

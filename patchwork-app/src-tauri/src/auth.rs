@@ -37,17 +37,13 @@ pub(crate) fn auth_status(state: State<AppState>) -> Result<LauncherAuthStatus, 
 pub(crate) fn start_oauth_login(
     app: AppHandle,
     state: State<AppState>,
-    server_url: Option<String>,
 ) -> Result<LauncherAuthStatus, String> {
-    let requested_server_url = match server_url {
-        Some(server_url) => server_url,
-        None => state
-            .auth
-            .lock()
-            .map_err(|_| "auth lock is poisoned".to_string())?
-            .server_url
-            .clone(),
-    };
+    let requested_server_url = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_string())?
+        .backend
+        .clone();
     let server_url = normalize_server_url(&requested_server_url)?;
 
     {
@@ -316,14 +312,14 @@ fn complete_oauth_flow(
         .find_map(|(key, value)| (key == "state").then(|| value.into_owned()));
 
     if state.as_deref() != Some(&csrf_state) {
-        let _ = write_loopback_response(&mut stream, false);
+        let _ = write_loopback_response(&mut stream, false, &server_url);
         return Err("OAuth callback state did not match".to_string());
     }
 
     let code = match code {
         Ok(code) => code,
         Err(error) => {
-            let _ = write_loopback_response(&mut stream, false);
+            let _ = write_loopback_response(&mut stream, false, &server_url);
             return Err(error);
         }
     };
@@ -335,14 +331,14 @@ fn complete_oauth_flow(
             .auth
             .lock()
             .map_err(|_| "auth lock is poisoned".to_string())?;
-        auth.server_url = server_url;
+        auth.server_url = server_url.clone();
         auth.access_token = Some(token_response.access_token);
         auth.profile = Some(token_response.profile);
         save_auth_state(&app_state.auth_path, &auth).map_err(|error| error.to_string())?;
         emit_auth_event(app, auth.status(), None);
     }
 
-    write_loopback_response(&mut stream, true).map_err(|error| error.to_string())
+    write_loopback_response(&mut stream, true, &server_url).map_err(|error| error.to_string())
 }
 
 fn read_callback_path(stream: &TcpStream) -> Result<String, String> {
@@ -415,7 +411,7 @@ fn complete_github_flow(
         .find_map(|(key, value)| (key == "github").then(|| value.into_owned()))
         .ok_or_else(|| "GitHub callback did not include a result".to_string())?;
     if result != "connected" {
-        let _ = write_github_loopback_response(&mut stream, false);
+        let _ = write_github_loopback_response(&mut stream, false, &server_url);
         return Err(match result.as_str() {
             "already-linked" => {
                 "This GitHub account is already linked to another Patchwork account".to_string()
@@ -439,10 +435,15 @@ fn complete_github_flow(
         emit_auth_event(app, auth.status(), None);
     }
 
-    write_github_loopback_response(&mut stream, true).map_err(|error| error.to_string())
+    write_github_loopback_response(&mut stream, true, &server_url)
+        .map_err(|error| error.to_string())
 }
 
-fn write_loopback_response(stream: &mut TcpStream, success: bool) -> Result<(), io::Error> {
+fn write_loopback_response(
+    stream: &mut TcpStream,
+    success: bool,
+    server_url: &str,
+) -> Result<(), io::Error> {
     let (title, body) = if success {
         (
             "Patchwork login complete",
@@ -454,10 +455,14 @@ fn write_loopback_response(stream: &mut TcpStream, success: bool) -> Result<(), 
             "The launcher could not complete authentication.",
         )
     };
-    write_completion_response(stream, title, body)
+    write_completion_response(stream, title, body, server_url)
 }
 
-fn write_github_loopback_response(stream: &mut TcpStream, success: bool) -> Result<(), io::Error> {
+fn write_github_loopback_response(
+    stream: &mut TcpStream,
+    success: bool,
+    server_url: &str,
+) -> Result<(), io::Error> {
     let (title, body) = if success {
         (
             "GitHub account connected",
@@ -469,14 +474,16 @@ fn write_github_loopback_response(stream: &mut TcpStream, success: bool) -> Resu
             "Return to Patchwork for more information.",
         )
     };
-    write_completion_response(stream, title, body)
+    write_completion_response(stream, title, body, server_url)
 }
 
 fn write_completion_response(
     stream: &mut TcpStream,
     title: &str,
     body: &str,
+    server_url: &str,
 ) -> Result<(), io::Error> {
+    let return_url = format!("{}/", server_url.trim_end_matches('/'));
     let html = format!(
         r#"<!doctype html>
 <html>
@@ -527,7 +534,9 @@ fn write_completion_response(
     }}
     h1 {{ margin: 0; font-size: 38px; line-height: 1; }}
     p {{ margin: 0; color: var(--muted); line-height: 1.55; }}
-    button {{
+    a {{
+      display: grid;
+      place-items: center;
       min-height: 42px;
       border: 0;
       border-radius: 8px;
@@ -536,6 +545,7 @@ fn write_completion_response(
       cursor: pointer;
       font: inherit;
       font-weight: 900;
+      text-decoration: none;
     }}
   </style>
 </head>
@@ -543,7 +553,7 @@ fn write_completion_response(
   <main>
     <h1>{title}</h1>
     <p>{body}</p>
-    <button type="button" onclick="window.close()">Return to Patchwork</button>
+    <a href="{return_url}">Return to Patchwork</a>
   </main>
 </body>
 </html>"#
@@ -668,7 +678,7 @@ pub(crate) fn endpoint_url(server_url: &str, path: &str) -> Result<String, Strin
         .to_string())
 }
 
-fn normalize_server_url(value: &str) -> Result<String, String> {
+pub(crate) fn normalize_server_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim().trim_end_matches('/');
     let parsed = Url::parse(trimmed).map_err(|error| error.to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") {

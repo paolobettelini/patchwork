@@ -86,16 +86,17 @@ CREATE INDEX mod_versions_source_idx ON mod_versions(source_commit, source_tree_
 CREATE TABLE mod_version_dependencies (
     version_id TEXT NOT NULL,
     relation_kind TEXT NOT NULL CHECK (relation_kind IN ('init', 'run', 'ownership')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('mod', 'modpack')),
     target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
     position INTEGER NOT NULL CHECK (position >= 0),
-    PRIMARY KEY (version_id, relation_kind, target_id),
+    PRIMARY KEY (version_id, relation_kind, target_kind, target_id),
     FOREIGN KEY (version_id) REFERENCES mod_versions(id) ON DELETE CASCADE
 );
 
 CREATE UNIQUE INDEX mod_version_dependencies_position_unique
     ON mod_version_dependencies(version_id, relation_kind, position);
 CREATE INDEX mod_version_dependencies_target_idx
-    ON mod_version_dependencies(relation_kind, target_id);
+    ON mod_version_dependencies(target_kind, target_id);
 
 CREATE TABLE registry_scans (
     id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
@@ -123,9 +124,11 @@ CREATE INDEX registry_scans_expires_at_idx ON registry_scans(expires_at);
 CREATE TABLE registry_scan_entries (
     id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
     scan_id TEXT NOT NULL,
-    mod_id TEXT NOT NULL CHECK (length(mod_id) BETWEEN 1 AND 128),
+    project_kind TEXT NOT NULL CHECK (project_kind IN ('mod', 'modpack')),
+    project_id TEXT NOT NULL CHECK (length(project_id) BETWEEN 1 AND 128),
     version TEXT NOT NULL CHECK (length(version) BETWEEN 1 AND 64),
     title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
+    description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 4000),
     repository_path TEXT NOT NULL CHECK (length(repository_path) BETWEEN 1 AND 1024),
     source_tree_oid TEXT NOT NULL CHECK (length(source_tree_oid) BETWEEN 40 AND 64),
     manifest_path TEXT NOT NULL CHECK (length(manifest_path) BETWEEN 1 AND 1024),
@@ -144,40 +147,68 @@ CREATE TABLE registry_scan_entries (
 );
 
 CREATE INDEX registry_scan_entries_scan_idx ON registry_scan_entries(scan_id);
-CREATE INDEX registry_scan_entries_mod_idx ON registry_scan_entries(mod_id, version);
+CREATE INDEX registry_scan_entries_project_idx
+    ON registry_scan_entries(project_kind, project_id, version);
 
 CREATE TABLE modpacks (
     id TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 1 AND 128),
+    publisher_uuid TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    source_base_path TEXT NOT NULL CHECK (length(source_base_path) BETWEEN 1 AND 1024),
+    latest_version_id TEXT,
+    downloads INTEGER NOT NULL DEFAULT 0 CHECK (downloads >= 0),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (publisher_uuid) REFERENCES accounts(uuid) ON DELETE RESTRICT,
+    FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX modpacks_publisher_idx ON modpacks(publisher_uuid);
+CREATE INDEX modpacks_repository_idx ON modpacks(repository_id);
+CREATE INDEX modpacks_created_at_idx ON modpacks(created_at DESC);
+
+CREATE TABLE modpack_versions (
+    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+    modpack_id TEXT NOT NULL,
+    version TEXT NOT NULL CHECK (length(version) BETWEEN 1 AND 64),
     title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 200),
     description TEXT NOT NULL CHECK (length(description) <= 4000),
-    published_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    downloads INTEGER NOT NULL DEFAULT 0 CHECK (downloads >= 0),
-    publisher_uuid TEXT NOT NULL,
-    repository_url TEXT NOT NULL CHECK (length(repository_url) <= 2048),
+    repository_path TEXT NOT NULL CHECK (length(repository_path) BETWEEN 1 AND 1024),
+    source_commit TEXT NOT NULL CHECK (length(source_commit) BETWEEN 40 AND 64),
+    source_tree_oid TEXT NOT NULL CHECK (length(source_tree_oid) BETWEEN 40 AND 64),
     manifest_path TEXT NOT NULL CHECK (length(manifest_path) BETWEEN 1 AND 1024),
-    source_ref TEXT NOT NULL CHECK (length(source_ref) BETWEEN 1 AND 255),
-    logo_url TEXT CHECK (logo_url IS NULL OR length(logo_url) <= 2048),
-    FOREIGN KEY (publisher_uuid) REFERENCES accounts(uuid) ON DELETE RESTRICT
+    manifest_blob_oid TEXT NOT NULL CHECK (length(manifest_blob_oid) BETWEEN 40 AND 64),
+    manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+    readme_path TEXT CHECK (readme_path IS NULL OR length(readme_path) BETWEEN 1 AND 1024),
+    readme_blob_oid TEXT CHECK (readme_blob_oid IS NULL OR length(readme_blob_oid) BETWEEN 40 AND 64),
+    image_path TEXT CHECK (image_path IS NULL OR length(image_path) BETWEEN 1 AND 1024),
+    image_blob_oid TEXT CHECK (image_blob_oid IS NULL OR length(image_blob_oid) BETWEEN 40 AND 64),
+    metadata_json TEXT NOT NULL,
+    published_by TEXT NOT NULL,
+    published_github_user_id BIGINT NOT NULL CHECK (published_github_user_id > 0),
+    published_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    yanked_at TIMESTAMP,
+    CONSTRAINT modpack_versions_modpack_version_unique UNIQUE (modpack_id, version),
+    FOREIGN KEY (modpack_id) REFERENCES modpacks(id) ON DELETE RESTRICT,
+    FOREIGN KEY (published_by) REFERENCES accounts(uuid) ON DELETE RESTRICT
 );
 
-CREATE INDEX modpacks_title_idx ON modpacks(title);
-CREATE INDEX modpacks_publisher_idx ON modpacks(publisher_uuid);
-CREATE INDEX modpacks_published_at_idx ON modpacks(published_at DESC);
-CREATE INDEX modpacks_repository_idx ON modpacks(repository_url, manifest_path);
+CREATE INDEX modpack_versions_modpack_idx ON modpack_versions(modpack_id, published_at DESC);
+CREATE INDEX modpack_versions_source_idx ON modpack_versions(source_commit, source_tree_oid);
 
-CREATE TABLE modpack_dependencies (
-    modpack_id TEXT NOT NULL,
+CREATE TABLE modpack_version_dependencies (
+    version_id TEXT NOT NULL,
     relation_kind TEXT NOT NULL CHECK (relation_kind IN ('mod', 'modpack', 'ignore')),
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('mod', 'modpack')),
     target_id TEXT NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
     position INTEGER NOT NULL CHECK (position >= 0),
-    PRIMARY KEY (modpack_id, relation_kind, target_id),
-    FOREIGN KEY (modpack_id) REFERENCES modpacks(id) ON DELETE CASCADE
+    PRIMARY KEY (version_id, relation_kind, target_kind, target_id),
+    FOREIGN KEY (version_id) REFERENCES modpack_versions(id) ON DELETE CASCADE
 );
 
-CREATE UNIQUE INDEX modpack_dependencies_position_unique
-    ON modpack_dependencies(modpack_id, position);
-CREATE INDEX modpack_dependencies_target_idx
-    ON modpack_dependencies(relation_kind, target_id);
+CREATE UNIQUE INDEX modpack_version_dependencies_position_unique
+    ON modpack_version_dependencies(version_id, relation_kind, position);
+CREATE INDEX modpack_version_dependencies_target_idx
+    ON modpack_version_dependencies(target_kind, target_id);
 
 CREATE TABLE web_sessions (
     token_hash TEXT PRIMARY KEY NOT NULL CHECK (length(token_hash) = 64),

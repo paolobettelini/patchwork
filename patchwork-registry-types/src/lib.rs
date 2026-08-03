@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub fn is_generated_mod_id(id: &str) -> bool {
+    id.contains("generated")
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryScanRequest {
@@ -17,6 +21,151 @@ pub struct RegistryRepository {
     pub owner: String,
     pub name: String,
     pub canonical_url: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RegistryProjectKind {
+    Mod,
+    Modpack,
+}
+
+impl RegistryProjectKind {
+    pub const fn route_segment(self) -> &'static str {
+        match self {
+            Self::Mod => "mods",
+            Self::Modpack => "modpacks",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryProjectRef {
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryBrowseRequest {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default = "default_true")]
+    pub include_mods: bool,
+    #[serde(default = "default_true")]
+    pub include_modpacks: bool,
+}
+
+impl Default for RegistryBrowseRequest {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            include_mods: true,
+            include_modpacks: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RegistryBrowseSource {
+    Remote,
+    Local,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryBrowseProject {
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub version: String,
+    pub downloads: i64,
+    pub source: RegistryBrowseSource,
+    pub source_label: String,
+    #[serde(default)]
+    pub repository_url: Option<String>,
+    #[serde(default)]
+    pub repository_path: Option<String>,
+    #[serde(default)]
+    pub source_commit: Option<String>,
+    #[serde(default)]
+    pub source_tree_oid: Option<String>,
+    #[serde(default)]
+    pub manifest_sha256: Option<String>,
+    #[serde(default)]
+    pub manifest_url: Option<String>,
+    #[serde(default)]
+    pub readme_url: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub local_manifest_path: Option<String>,
+}
+
+impl RegistryBrowseProject {
+    pub fn project_ref(&self) -> RegistryProjectRef {
+        RegistryProjectRef {
+            project_kind: self.project_kind,
+            project_id: self.project_id.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryBrowseResponse {
+    pub projects: Vec<RegistryBrowseProject>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryProjectDetails {
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub version: String,
+    pub downloads: Option<i64>,
+    pub publisher_uuid: String,
+    pub publisher_name: String,
+    pub published_at: String,
+    pub repository_url: String,
+    pub repository_path: String,
+    pub source_commit: String,
+    pub source_tree_oid: String,
+    pub manifest_sha256: String,
+    pub manifest_url: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub readme_url: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<RegistryDependency>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryProfileOption {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryAddToProfileRequest {
+    pub project: RegistryProjectRef,
+    #[serde(default)]
+    pub selected_project: Option<RegistryBrowseProject>,
+    pub profile_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -41,12 +190,17 @@ pub enum RegistryDependencyKind {
     Init,
     Run,
     Ownership,
+    Provides,
+    Mod,
+    Modpack,
+    Ignore,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryDependency {
     pub kind: RegistryDependencyKind,
+    pub target_kind: RegistryProjectKind,
     pub target_id: String,
     pub available: bool,
 }
@@ -55,8 +209,10 @@ pub struct RegistryDependency {
 #[serde(rename_all = "camelCase")]
 pub struct RegistryScanEntry {
     pub entry_id: String,
-    pub mod_id: String,
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
     pub title: String,
+    pub description: String,
     pub version: String,
     pub repository_path: String,
     pub manifest_path: String,
@@ -102,7 +258,7 @@ pub enum RegistryScanPhase {
     Authorizing,
     IndexingRepository,
     FetchingManifests,
-    ValidatingMods,
+    ValidatingProjects,
     Persisting,
     Complete,
     Failed,
@@ -141,7 +297,8 @@ pub struct RegistryPublishRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryPublishedVersion {
-    pub mod_id: String,
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
     pub version: String,
     pub version_id: String,
 }
@@ -151,4 +308,8 @@ pub struct RegistryPublishedVersion {
 pub struct RegistryPublishResponse {
     pub scan_id: String,
     pub published: Vec<RegistryPublishedVersion>,
+}
+
+const fn default_true() -> bool {
+    true
 }

@@ -4,11 +4,29 @@ use uuid::Uuid;
 
 use crate::db::Database;
 use crate::error::{DatabaseError, Result};
-use crate::models::{Mod, ModVersion, Pagination, PublishedMod, RegistryModState, Repository};
-use crate::schema::{mod_versions, mods, repositories};
+use crate::models::{
+    Mod, ModVersion, ModVersionDependency, Pagination, PublishedMod, RegistryModState, Repository,
+};
+use crate::schema::{mod_version_dependencies, mod_versions, mods, repositories};
 use crate::validation::normalize_package_id;
 
 impl Database {
+    pub fn increment_mod_downloads(&self, id: &str) -> Result<i64> {
+        let id = normalize_package_id("mod_id", id)?;
+        let mut connection = self.connection()?;
+        let changed = diesel::update(mods::table.find(&id))
+            .set(mods::downloads.eq(mods::downloads + 1))
+            .execute(&mut connection)?;
+        if changed == 0 {
+            return Err(DatabaseError::NotFound { entity: "mod", id });
+        }
+        mods::table
+            .find(&id)
+            .select(mods::downloads)
+            .first(&mut connection)
+            .map_err(DatabaseError::from)
+    }
+
     pub fn get_mod(&self, id: &str) -> Result<Option<Mod>> {
         let id = normalize_package_id("mod_id", id)?;
         let mut connection = self.connection()?;
@@ -46,6 +64,19 @@ impl Database {
         }))
     }
 
+    pub fn list_mod_version_dependencies(
+        &self,
+        version_id: &str,
+    ) -> Result<Vec<ModVersionDependency>> {
+        let mut connection = self.connection()?;
+        mod_version_dependencies::table
+            .filter(mod_version_dependencies::version_id.eq(version_id))
+            .order(mod_version_dependencies::position.asc())
+            .select(ModVersionDependency::as_select())
+            .load(&mut connection)
+            .map_err(DatabaseError::from)
+    }
+
     pub fn list_mods_by_publisher(
         &self,
         publisher: Uuid,
@@ -66,6 +97,11 @@ impl Database {
                 mods::publisher_uuid,
                 repositories::canonical_url,
                 mod_versions::repository_path,
+                mod_versions::source_commit,
+                mod_versions::source_tree_oid,
+                mod_versions::manifest_sha256,
+                mod_versions::readme_path,
+                mod_versions::image_path,
             ))
             .filter(mods::publisher_uuid.eq(publisher))
             .order(mods::created_at.desc())
@@ -98,6 +134,11 @@ impl Database {
                 mods::publisher_uuid,
                 repositories::canonical_url,
                 mod_versions::repository_path,
+                mod_versions::source_commit,
+                mod_versions::source_tree_oid,
+                mod_versions::manifest_sha256,
+                mod_versions::readme_path,
+                mod_versions::image_path,
             ))
             .into_boxed();
         if !query.is_empty() {
@@ -105,7 +146,9 @@ impl Database {
             statement = statement.filter(
                 mods::id
                     .like(pattern.clone())
-                    .or(mod_versions::title.like(pattern)),
+                    .or(mod_versions::title.like(pattern.clone()))
+                    .or(repositories::owner.like(pattern.clone()))
+                    .or(repositories::name.like(pattern)),
             );
         }
         statement
