@@ -2403,6 +2403,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2472,6 +2482,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "flate2",
+ "libc",
+ "os_pipe",
  "patchwork",
  "patchwork-registry-types",
  "portable-pty",

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AppTab {
@@ -134,6 +135,29 @@ pub(crate) struct DependencyEntry {
 pub(crate) struct DependencyDiagnostic {
     pub(crate) kind: String,
     pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProfileOptions {
+    #[serde(default)]
+    pub(crate) build: ProcessOptions,
+    #[serde(default)]
+    pub(crate) run: ProcessOptions,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProcessOptions {
+    #[serde(default)]
+    pub(crate) args: Vec<String>,
+    #[serde(default)]
+    pub(crate) env: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileOptionsView {
+    pub(crate) options: ProfileOptions,
+    pub(crate) defaults: ProfileOptions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

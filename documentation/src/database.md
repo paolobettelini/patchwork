@@ -1,7 +1,7 @@
 # Database
 
 `patchwork-database` is the shared Diesel persistence layer for accounts,
-sessions, GitHub links, registry scans, and immutable mod/modpack versions.
+browser/app/game sessions, GitHub links, registry scans, and immutable mod/modpack versions.
 SQLite is the default backend; MySQL is an alternative compile-time feature.
 Exactly one backend feature must be enabled.
 
@@ -12,8 +12,8 @@ SQLite connections enable foreign keys and a five-second busy timeout.
 
 Patchwork currently keeps the complete schema in one baseline migration per
 backend. Schema edits intentionally have no upgrade compatibility. After this
-registry change, remove the development SQLite database and start the server so
-the baseline can create the new tables:
+game-authentication schema change, remove the development SQLite database and
+start the server so the baseline can create the new tables:
 
 ```bash
 rm patchwork-web/patchwork.sqlite
@@ -53,6 +53,30 @@ data matters.
 Raw session tokens, app tokens, authorization codes, email codes, and GitHub
 states are never stored. GitHub OAuth user tokens and GitHub App installation
 tokens are not persisted at all.
+
+## Game authentication tables
+
+| Table | Purpose |
+| --- | --- |
+| `game_server_instances` | Ephemeral random server UUID, SHA-256 secret hash, active/expired/closed state, heartbeat timestamp, and renewable lease expiry. |
+| `game_launch_tickets` | SHA-256 one-use launcher ticket hash, account UUID, 60-second expiry and consumption time. |
+| `game_process_sessions` | UUID, SHA-256 process-token hash, account UUID, expiry/use/revocation state. |
+| `game_handshakes` | Registered server key/nonce, optional authorized client/account/process binding, direct/transfer kind, expiry and state. |
+| `game_player_sessions` | Persistent admission UUID, current authoritative server, and active/disconnected state for an account/process. |
+| `game_transfer_tickets` | SHA-256 ticket hash, source binding, nullable target server/handshake assigned at authorization, total/reservation expiry, and created/reserved/consumed/expired state. |
+
+Launch consumption, handshake authorization/redemption, transfer reservation,
+and player-server movement use transactions plus status predicates. The
+database therefore enforces one-use semantics even when duplicate requests are
+concurrent. X25519 private keys, shared secrets, HKDF output, AES keys, and game
+packets never reach this database.
+
+Server IDs and secrets are not configured records. A running third-party
+server registers a fresh instance and keeps the plaintext secret in RAM. The
+periodic cleanup marks missed leases expired, disconnects their player
+sessions, and eventually removes retained terminal records. The transfer
+target remains null until the client authorizes a real handshake registered by
+server B, preserving make-before-break semantics on server A.
 
 ## Registry tables
 

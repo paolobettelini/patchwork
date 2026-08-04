@@ -42,6 +42,44 @@ The authorize endpoint accepts only `response_type=code`, client ID
 requires `grant_type=authorization_code`, the same redirect URI, and the
 original verifier.
 
+## Game identity API
+
+Game identity uses three distinct Bearer credentials. The launcher app token
+is accepted only for launch-ticket issuance, the resulting process token is
+accepted only for client handshake authorization, and each running game server
+uses the ephemeral secret returned by public instance registration for
+authenticated `/server/*` routes. Browser cookies are not accepted as a
+substitute on these routes.
+
+| Method | Route | Authentication | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/game/launch-ticket` | Desktop app Bearer token | Issue a random 60-second, one-use ticket for local process bootstrap. |
+| `POST` | `/game/process-sessions` | One-use launch ticket in JSON | Consume the ticket and return an in-memory process token plus account UUID/nickname. |
+| `POST` | `/game/handshakes/authorize` | Process Bearer token | Bind a registered handshake to the process/account and optionally reserve a transfer. |
+| `POST` | `/server/instances` | Public | Create an ephemeral server UUID and 32-byte secret with a 10-minute lease. |
+| `POST` | `/server/instances/{server_id}/heartbeat` | Matching server Bearer secret | Renew a live instance lease for 10 minutes. |
+| `DELETE` | `/server/instances/{server_id}` | Matching server Bearer secret | Close an instance and disconnect its active player sessions. |
+| `POST` | `/server/handshakes` | Server Bearer secret | Register a fresh version-1 server key/nonce handshake for 20 seconds. |
+| `POST` | `/server/handshakes/{handshake_id}/redeem` | Server Bearer secret | Atomically consume an authorized handshake and return trusted admission identity. |
+| `POST` | `/server/player-sessions/{player_session_id}/transfers` | Source-server Bearer secret | Issue a target-free 60-second transfer ticket for an active player. |
+| `GET` | `/server/transfers/{transfer_id}` | Source-server Bearer secret | Read `CREATED`, `RESERVED`, `CONSUMED`, or `EXPIRED` for an owned transfer. |
+
+Binary 32-byte values are unpadded Base64URL and request field names are
+`snake_case`. The backend recomputes the canonical SHA-256 transcript during
+authorization. Ticket/token values are stored only as SHA-256 hashes; waiting,
+authorized, reserved, and consumed state transitions are transactionally
+guarded against replay. Error responses use `{ "error": "code", "message":
+"..." }`.
+
+The backend derives server identity from the Bearer secret. Address, port, and
+application transfer cookie never enter these routes. During transfer
+authorization the destination is bound to the actual registered handshake;
+the player stays on the source until destination redeem succeeds.
+
+See [Game authentication and server transfer](./game_authentication.md) for all
+request/response bodies, exact transcript bytes, key derivation, encrypted
+channel requirements, launcher pipe framing, and direct/transfer flows.
+
 ## GitHub API
 
 | Method | Route | Authentication | Purpose |

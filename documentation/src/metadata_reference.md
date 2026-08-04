@@ -82,6 +82,18 @@ mods = [
     "some-mod",
     "modpack/common",
 ]
+
+[options.build]
+args = ["--config", "/absolute/path/to/.cargo/config.toml"]
+
+[options.build.env]
+RUST_LOG = "debug"
+
+[options.run]
+args = ["--server", "example.test:25565"]
+
+[options.run.env]
+GAME_LOG = "trace"
 ```
 
 `modpack/common` expands `modpacks/common.toml`.
@@ -94,7 +106,16 @@ Fields:
 - `color`: optional hex color for the launcher;
 - `modpacks`: imported modpacks;
 - `ignore`: mods excluded after import;
-- `mods`: explicitly selected mods.
+- `mods`: explicitly selected mods;
+- `options.build.args`: custom arguments appended to `cargo build`;
+- `options.build.env`: custom environment variables for Cargo Build;
+- `options.run.args`: custom arguments passed to the cached executable;
+- `options.run.env`: custom environment variables for the cached executable.
+
+Each argument is a distinct `argv` value; these arrays are not shell command
+strings. Options are used only when this file is the desktop root profile.
+Imported modpack options are not merged. Patchwork's read-only defaults are not
+serialized under `options` and their environment names are reserved.
 
 ## Assets and favicons
 

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{PatchworkError, Result};
@@ -22,6 +23,92 @@ pub struct Modpack {
     pub mods: Vec<String>,
     #[serde(default)]
     pub ignore: Vec<String>,
+    #[serde(default, skip_serializing_if = "ProfileOptions::is_empty")]
+    pub options: ProfileOptions,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct ProfileOptions {
+    #[serde(default, skip_serializing_if = "ProcessOptions::is_empty")]
+    pub build: ProcessOptions,
+    #[serde(default, skip_serializing_if = "ProcessOptions::is_empty")]
+    pub run: ProcessOptions,
+}
+
+impl ProfileOptions {
+    pub fn is_empty(&self) -> bool {
+        self.build.is_empty() && self.run.is_empty()
+    }
+
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        validate_process_options("build", &self.build, BUILD_RESERVED_ENV)?;
+        validate_process_options("run", &self.run, RUN_RESERVED_ENV)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, Eq, PartialEq)]
+pub struct ProcessOptions {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl ProcessOptions {
+    pub fn is_empty(&self) -> bool {
+        self.args.is_empty() && self.env.is_empty()
+    }
+}
+
+const BUILD_RESERVED_ENV: &[&str] = &["TERM", "COLORTERM", "CARGO_TERM_COLOR", "CARGO_TARGET_DIR"];
+const RUN_RESERVED_ENV: &[&str] = &[
+    "TERM",
+    "COLORTERM",
+    "BACKEND_ADDR",
+    "PATCHWORK_AUTH_FD",
+    "PATCHWORK_AUTH_PIPE_VERSION",
+];
+
+fn validate_process_options(
+    label: &str,
+    options: &ProcessOptions,
+    reserved_env: &[&str],
+) -> std::result::Result<(), String> {
+    if options.args.len() > 128 || options.env.len() > 128 {
+        return Err(format!(
+            "profile {label} options may contain at most 128 arguments and 128 environment variables"
+        ));
+    }
+    for argument in &options.args {
+        if argument.len() > 4096 || argument.contains('\0') {
+            return Err(format!("a profile {label} argument is invalid or too long"));
+        }
+    }
+    for (name, value) in &options.env {
+        let valid_name = !name.is_empty()
+            && name.len() <= 256
+            && name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_'
+                    || byte.is_ascii_alphanumeric() && (index > 0 || !byte.is_ascii_digit())
+            });
+        if !valid_name {
+            return Err(format!("'{name}' is not a valid environment variable name"));
+        }
+        if value.len() > 8192 || value.contains('\0') {
+            return Err(format!(
+                "the value of profile {label} variable '{name}' is invalid or too long"
+            ));
+        }
+        if reserved_env
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
+            return Err(format!(
+                "profile {label} variable '{name}' is managed by Patchwork and cannot be overridden"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

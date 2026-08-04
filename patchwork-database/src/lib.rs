@@ -17,11 +17,13 @@ mod ops;
 pub use db::{Database, DatabaseConfig};
 pub use error::{DatabaseError, Result};
 pub use models::{
-    Account, AppToken, CreateAccount, CreatePendingRegistration, CreateRegistryScan,
-    CreateRegistryScanEntry, GithubAccount, GithubOAuthState, Mod, ModVersion,
-    ModVersionDependency, Modpack, ModpackVersion, ModpackVersionDependency,
-    OAuthAuthorizationCode, Pagination, PendingRegistration, PendingRegistrationVerification,
-    PublishedMod, PublishedModpack, PublishedRegistryVersion, RegistryModState,
-    RegistryModpackState, RegistryPublishResult, RegistryScan, RegistryScanEntry,
-    RegistryScanWithEntries, Repository, WebSession,
+    Account, AppToken, AuthorizedGameProcess, CreateAccount, CreatePendingRegistration,
+    CreateRegistryScan, CreateRegistryScanEntry, CreatedGameTransfer, GameAdmission, GameHandshake,
+    GameLaunchTicket, GamePlayerSession, GameProcessSession, GameServerInstance,
+    GameTransferTicket, GithubAccount, GithubOAuthState, Mod, ModVersion, ModVersionDependency,
+    Modpack, ModpackVersion, ModpackVersionDependency, OAuthAuthorizationCode, Pagination,
+    PendingRegistration, PendingRegistrationVerification, PublishedMod, PublishedModpack,
+    PublishedRegistryVersion, RegistryModState, RegistryModpackState, RegistryPublishResult,
+    RegistryScan, RegistryScanEntry, RegistryScanWithEntries, Repository, WebSession,
 };
+pub use ops::game_auth::{AuthorizeGameHandshake, CreateGameTransfer, RedeemGameHandshake};

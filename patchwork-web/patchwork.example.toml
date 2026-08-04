@@ -13,3 +13,6 @@ client_id = "replace-with-github-client-id"
 client_secret = "replace-with-github-client-secret"
 private_key_path = "./github-app.pem"
 callback_url = "http://localhost:8080/github/callback"
+
+[game-auth]
+process-session-hours = 8

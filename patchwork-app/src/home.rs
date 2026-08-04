@@ -15,10 +15,12 @@ use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
 mod dependencies;
 mod details;
+mod options;
 mod sidebar;
 
 use dependencies::DependencyPanel;
 use details::{DetailsPanel, format_downloads};
+use options::OptionsPanel;
 use sidebar::ProfilesSidebar;
 
 #[component]
@@ -122,6 +124,11 @@ pub(crate) fn HomePage(
 
     Effect::new(move |_| {
         let page = dependency_page.get();
+        if !page.as_ref().is_some_and(|page| page.editable_profile)
+            && active_detail_tab.get_untracked() == "options"
+        {
+            set_active_detail_tab.set("details");
+        }
         set_patchwork_action_error.set(None);
         if let Some(page) = page {
             if page.editable_profile {
@@ -687,6 +694,15 @@ pub(crate) fn HomePage(
                             >
                                 "Console"
                             </button>
+                            <Show when=move || dependency_page.get().is_some_and(|page| page.editable_profile)>
+                                <button
+                                    type="button"
+                                    class=move || detail_tab_class(active_detail_tab.get() == "options")
+                                    on:click=move |_| set_active_detail_tab.set("options")
+                                >
+                                    "Options"
+                                </button>
+                            </Show>
                         </div>
 
                         {move || match active_detail_tab.get() {
@@ -702,7 +718,9 @@ pub(crate) fn HomePage(
                                     set_history=set_navigation_history
                                 />
                             }.into_any(),
-                            _ => view! { <ConsoleTerminal dependency_page build_mode /> }.into_any(),
+                            "console" => view! { <ConsoleTerminal dependency_page build_mode /> }.into_any(),
+                            "options" => view! { <OptionsPanel page=dependency_page build_mode /> }.into_any(),
+                            _ => view! { <DetailsPanel page=dependency_page /> }.into_any(),
                         }}
                     </section>
                 </Show>

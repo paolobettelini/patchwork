@@ -80,13 +80,34 @@ symbolic link at Cargo's original target path. Copy-then-remove semantics are
 used so target and binary cache may reside on different filesystems.
 
 Run never invokes Cargo. It starts the cached executable directly in the PTY,
-using the composed project as its working directory when available. Only that
-game process receives `BACKEND_ADDR`, whose value is the current **Backend**
-setting. Compose, codegen and Cargo Build do not receive this variable. The Stop
-command retains enough native process state to terminate either Cargo Build or
-the running game. Patchwork also sets `BEVY_ASSET_ROOT` to the composed project,
-so Bevy still finds its assembled `assets/` tree after the executable is moved
-to the binary cache.
+using the executable's binary-cache directory as its working directory. That
+directory contains an `assets` symbolic link to the composed project's
+assembled `assets/` tree, so programs can use ordinary relative asset paths
+without depending on a particular game engine. Only the game process receives
+`BACKEND_ADDR`, whose value is the current **Backend** setting. Compose, codegen
+and Cargo Build do not receive this variable. The Stop command retains enough
+native process state to terminate either Cargo Build or the running game.
+
+Every editable profile has an **Options** tab beside Details, Dependencies, and
+Console. It stores four per-profile collections directly in the profile TOML:
+
+- custom Cargo Build environment variables;
+- custom Cargo Build arguments;
+- custom executable environment variables;
+- custom executable arguments.
+
+The UI also displays launcher defaults as gray read-only rows. Build defaults
+include `TERM`, `COLORTERM`, `CARGO_TERM_COLOR`, `CARGO_TARGET_DIR`, `build`, and
+the selected mode's `--release`. Run defaults include `TERM`, `COLORTERM`, and
+`BACKEND_ADDR`; authenticated runs additionally reserve `PATCHWORK_AUTH_FD` and
+`PATCHWORK_AUTH_PIPE_VERSION`. A custom value cannot override these names.
+
+Arguments are represented as an array and passed directly as `argv`, without a
+shell. A flag and its value therefore normally occupy two rows. Build arguments
+are appended after `cargo build` and the selected debug/release option. Both the
+ordinary and authenticated executable launch paths receive the same custom run
+arguments and environment. Imported dependency modpacks do not contribute
+options; only the root profile does.
 
 The gear beside the primary action configures an ordered checkbox pipeline:
 **Download**, **Compose**, **Build**. All three default to enabled. Enabling a
@@ -141,6 +162,16 @@ the configured server URL.
 
 GitHub linking uses a separate short-lived loopback listener and is described
 in [GitHub integration](./github_integration.md).
+
+Before Run, a signed-in launcher requests a 60-second launch ticket using the
+desktop bearer token. It starts the game with a separate anonymous pipe on file
+descriptor `3`, advertises only that descriptor through `PATCHWORK_AUTH_FD`,
+and writes `u32` big-endian length plus the UTF-8 ticket. The ticket is never an
+argument, environment value, terminal message, or file. `BACKEND_ADDR` tells
+the executable where to consume it. Logged-out launches omit the pipe and
+remain anonymous; an authenticated ticket request failure aborts Run rather
+than silently changing identity. See
+[Game authentication and server transfer](./game_authentication.md).
 
 The configured Backend defaults to `http://127.0.0.1:8080` and is the single
 network origin for auth, GitHub, registry browsing, Upload, Profile, and

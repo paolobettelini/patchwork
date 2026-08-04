@@ -354,6 +354,13 @@ pub(crate) struct LauncherDependencyPage {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileOptionsView {
+    pub(crate) options: patchwork::ProfileOptions,
+    pub(crate) defaults: patchwork::ProfileOptions,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct PatchworkConsoleEvent {
     pub(crate) profile_id: String,
     pub(crate) reset: bool,
@@ -421,6 +428,8 @@ pub(crate) struct NewModpackToml {
     pub(crate) ignore: Vec<String>,
     #[serde(default)]
     pub(crate) mods: Vec<String>,
+    #[serde(default, skip_serializing_if = "patchwork::ProfileOptions::is_empty")]
+    pub(crate) options: patchwork::ProfileOptions,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

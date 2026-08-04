@@ -16,6 +16,8 @@ flate2 = "1"
 patchwork = { path = "../../patchwork" }
 patchwork-registry-types = { path = "../../patchwork-registry-types" }
 portable-pty = "0.9"
+libc = "0.2"
+os_pipe = "1.2"
 rand = "0.9"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }

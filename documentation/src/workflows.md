@@ -78,6 +78,32 @@ This matters for registry installations: Patchwork downloads normal, API, and
 support mods, but Cargo must be able to fetch helper libraries that are not
 Patchwork projects.
 
+For a desktop development profile, a practical setup is:
+
+1. Point **Mod cache** at the checkout's `mods/` directory.
+2. Point **Modpack cache** at the checkout's `modpacks/` directory.
+3. Add the checkout, or the appropriate project folder, to **Registries / Local
+   folders** so Browse resolves development projects locally before the remote
+   registry.
+4. Open the profile's **Options** tab and add two compilation argument rows:
+   `--config` and the absolute path to `mods/.cargo/config.toml`.
+
+The explicit config argument matters because Cargo Build runs with the composed
+project as its working directory. Cargo would not discover a `.cargo` directory
+under the separate mod cache by walking that directory. Keep repository-local
+plain-library overrides in the selected config:
+
+```toml
+[patch."https://github.com/example/project.git"]
+codegen-utils = { path = "/absolute/path/to/mods/codegen-utils" }
+```
+
+Using an absolute config path makes the profile independent of the composed
+build cache location. The launcher stores the two values as separate `argv`
+items and passes them to `cargo build` without shell parsing. This solution is
+profile-specific: ordinary downloaded profiles continue to use their published
+Git dependencies, while a development profile can opt into local libraries.
+
 ## Debug
 
 When something does not work, check in this order:

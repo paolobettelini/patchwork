@@ -301,3 +301,127 @@ CREATE TABLE github_oauth_states (
     INDEX github_oauth_states_account_idx (account_uuid),
     INDEX github_oauth_states_expires_at_idx (expires_at)
 ) ENGINE=InnoDB;
+
+CREATE TABLE game_server_instances (
+    server_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    secret_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME NOT NULL,
+    expires_at DATETIME NOT NULL,
+    closed_at DATETIME NULL,
+    CONSTRAINT game_server_instances_status_check CHECK (status IN ('active', 'expired', 'closed')),
+    INDEX game_server_instances_expires_at_idx (expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE game_launch_tickets (
+    ticket_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    account_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    consumed_at DATETIME NULL,
+    CONSTRAINT game_launch_tickets_account_fk FOREIGN KEY (account_uuid)
+        REFERENCES accounts(uuid) ON DELETE CASCADE,
+    INDEX game_launch_tickets_account_idx (account_uuid),
+    INDEX game_launch_tickets_expires_at_idx (expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE game_process_sessions (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    token_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+    account_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    last_used_at DATETIME NULL,
+    revoked_at DATETIME NULL,
+    CONSTRAINT game_process_sessions_account_fk FOREIGN KEY (account_uuid)
+        REFERENCES accounts(uuid) ON DELETE CASCADE,
+    INDEX game_process_sessions_account_idx (account_uuid),
+    INDEX game_process_sessions_expires_at_idx (expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE game_player_sessions (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    account_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    process_session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    current_server_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    disconnected_at DATETIME NULL,
+    CONSTRAINT game_player_sessions_status_check CHECK (status IN ('active', 'disconnected')),
+    CONSTRAINT game_player_sessions_account_fk FOREIGN KEY (account_uuid)
+        REFERENCES accounts(uuid) ON DELETE CASCADE,
+    CONSTRAINT game_player_sessions_process_fk FOREIGN KEY (process_session_id)
+        REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    CONSTRAINT game_player_sessions_server_fk FOREIGN KEY (current_server_id)
+        REFERENCES game_server_instances(server_id) ON DELETE RESTRICT,
+    INDEX game_player_sessions_account_idx (account_uuid),
+    INDEX game_player_sessions_process_idx (process_session_id),
+    INDEX game_player_sessions_server_idx (current_server_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE game_transfer_tickets (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    ticket_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE,
+    player_session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    process_session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    account_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    source_server_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    target_server_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    target_handshake_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL UNIQUE,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    reserved_at DATETIME NULL,
+    reservation_expires_at DATETIME NULL,
+    consumed_at DATETIME NULL,
+    CONSTRAINT game_transfer_tickets_status_check CHECK (status IN ('created', 'reserved', 'consumed', 'expired')),
+    CONSTRAINT game_transfer_tickets_distinct_servers_check CHECK (target_server_id IS NULL OR source_server_id <> target_server_id),
+    CONSTRAINT game_transfer_tickets_player_fk FOREIGN KEY (player_session_id)
+        REFERENCES game_player_sessions(id) ON DELETE CASCADE,
+    CONSTRAINT game_transfer_tickets_process_fk FOREIGN KEY (process_session_id)
+        REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    CONSTRAINT game_transfer_tickets_account_fk FOREIGN KEY (account_uuid)
+        REFERENCES accounts(uuid) ON DELETE CASCADE,
+    CONSTRAINT game_transfer_tickets_source_server_fk FOREIGN KEY (source_server_id)
+        REFERENCES game_server_instances(server_id) ON DELETE RESTRICT,
+    CONSTRAINT game_transfer_tickets_target_server_fk FOREIGN KEY (target_server_id)
+        REFERENCES game_server_instances(server_id) ON DELETE RESTRICT,
+    INDEX game_transfer_tickets_player_idx (player_session_id),
+    INDEX game_transfer_tickets_expires_at_idx (expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE game_handshakes (
+    id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin PRIMARY KEY,
+    protocol_version INT NOT NULL,
+    server_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    server_public_key CHAR(43) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    server_nonce CHAR(43) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    process_session_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    account_uuid CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    client_public_key CHAR(43) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    client_nonce CHAR(43) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    handshake_hash CHAR(43) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    transfer_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NULL,
+    status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    authorized_at DATETIME NULL,
+    consumed_at DATETIME NULL,
+    CONSTRAINT game_handshakes_protocol_check CHECK (protocol_version BETWEEN 1 AND 65535),
+    CONSTRAINT game_handshakes_kind_check CHECK (kind IS NULL OR kind IN ('direct', 'transfer')),
+    CONSTRAINT game_handshakes_status_check CHECK (status IN ('waiting', 'authorized', 'consumed')),
+    CONSTRAINT game_handshakes_server_fk FOREIGN KEY (server_id)
+        REFERENCES game_server_instances(server_id) ON DELETE CASCADE,
+    CONSTRAINT game_handshakes_process_fk FOREIGN KEY (process_session_id)
+        REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    CONSTRAINT game_handshakes_account_fk FOREIGN KEY (account_uuid)
+        REFERENCES accounts(uuid) ON DELETE CASCADE,
+    CONSTRAINT game_handshakes_transfer_fk FOREIGN KEY (transfer_id)
+        REFERENCES game_transfer_tickets(id) ON DELETE CASCADE,
+    INDEX game_handshakes_server_idx (server_id),
+    INDEX game_handshakes_expires_at_idx (expires_at),
+    INDEX game_handshakes_process_idx (process_session_id)
+) ENGINE=InnoDB;

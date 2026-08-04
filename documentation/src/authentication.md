@@ -84,10 +84,14 @@ Protected backend routes accept either the browser session cookie or
 share profile and GitHub endpoints while keeping their persistence mechanisms
 different.
 
-## Future game authentication
+## Game authentication
 
-The stable account UUID is suitable for passing an optional player identity to
-a composed game. A future game login protocol should issue a short-lived,
-audience-bound game ticket instead of exposing the long-lived desktop bearer
-token. Game clients and servers can then validate that ticket with Patchwork's
-backend. That protocol is not implemented yet.
+The launcher never exposes its long-lived desktop token to a game. Immediately
+before Run it exchanges that credential for a random, 60-second, one-use launch
+ticket and sends the ticket through a separate anonymous pipe. The game
+consumes it to obtain an in-memory process token, then uses short-lived,
+server-bound handshakes to prove the account UUID to participating servers.
+
+Dynamic server leases/secrets, direct admission, X25519 transcript binding,
+replay protection, AES-GCM channel requirements, and atomic server-to-server transfer are defined
+in [Game authentication and server transfer](./game_authentication.md).

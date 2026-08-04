@@ -17,6 +17,7 @@ pub(crate) struct ServerConfig {
     pub(crate) frontend_url: Url,
     pub(crate) email: EmailConfig,
     pub(crate) github: GithubConfig,
+    pub(crate) game_auth: GameAuthConfig,
 }
 
 #[derive(Clone)]
@@ -33,12 +34,19 @@ pub(crate) struct GithubConfig {
     pub(crate) callback_url: Url,
 }
 
+#[derive(Clone)]
+pub(crate) struct GameAuthConfig {
+    pub(crate) process_session_hours: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct ConfigFile {
     server: ServerConfigFile,
     email: EmailConfigFile,
     github: GithubConfigFile,
+    #[serde(default)]
+    game_auth: GameAuthConfigFile,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +73,12 @@ struct GithubConfigFile {
     client_secret: String,
     private_key_path: PathBuf,
     callback_url: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct GameAuthConfigFile {
+    process_session_hours: Option<i64>,
 }
 
 impl ServerConfig {
@@ -105,6 +119,11 @@ impl ServerConfig {
             return Err("github.client_secret cannot be empty".to_owned());
         }
 
+        let process_session_hours = file.game_auth.process_session_hours.unwrap_or(8);
+        if !(1..=168).contains(&process_session_hours) {
+            return Err("game-auth.process-session-hours must be between 1 and 168".to_owned());
+        }
+
         Ok(Self {
             address,
             port: port_override.or(file.server.port).unwrap_or(DEFAULT_PORT),
@@ -119,6 +138,9 @@ impl ServerConfig {
                 client_secret: file.github.client_secret,
                 private_key_path,
                 callback_url,
+            },
+            game_auth: GameAuthConfig {
+                process_session_hours,
             },
         })
     }
@@ -180,6 +202,9 @@ client_id = "client"
 client_secret = "secret"
 private_key_path = "./github-app.pem"
 callback_url = "http://localhost:8080/github/callback"
+
+[game-auth]
+process-session-hours = 24
 "#,
         )
         .unwrap();
@@ -190,6 +215,7 @@ callback_url = "http://localhost:8080/github/callback"
         assert_eq!(config.port, 8080);
         assert_eq!(config.frontend_url.as_str(), "http://localhost:3000/");
         assert_eq!(config.email.resend_api_key, "resend-key");
+        assert_eq!(config.game_auth.process_session_hours, 24);
         assert_eq!(
             config.github.private_key_path,
             directory.path().join("./github-app.pem")

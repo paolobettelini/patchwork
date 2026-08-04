@@ -176,6 +176,13 @@ pub fn parse_registry_modpack_manifest(
             format!("cannot parse metadata: {error}"),
         )
     })?;
+    modpack.options.validate().map_err(|reason| {
+        invalid_modpack_metadata(
+            manifest_path,
+            &id,
+            format!("invalid profile options: {reason}"),
+        )
+    })?;
     let version = modpack.version.trim().to_owned();
     Version::parse(&version).map_err(|error| {
         invalid_modpack_metadata(
@@ -441,6 +448,12 @@ name = "Example Pack"
 modpacks = ["foundation"]
 mods = ["renderer", "modpack/ui"]
 ignore = ["legacy-renderer"]
+
+[options.build]
+args = ["--config", "/tmp/development-config.toml"]
+
+[options.run.env]
+GAME_LOG = "trace"
 "#;
         let parsed = parse_registry_modpack_manifest(source, Path::new("packs/example.toml"))
             .unwrap()
@@ -453,6 +466,14 @@ ignore = ["legacy-renderer"]
             RegistryDependencyTargetKind::Modpack
         );
         assert!(parsed.dependencies[3].ignored);
+        assert_eq!(
+            parsed.modpack.options.build.args,
+            ["--config", "/tmp/development-config.toml"]
+        );
+        assert_eq!(
+            parsed.modpack.options.run.env.get("GAME_LOG"),
+            Some(&"trace".to_owned())
+        );
     }
 
     #[test]
@@ -463,5 +484,22 @@ ignore = ["legacy-renderer"]
         )
         .unwrap_err();
         assert!(error.to_string().contains("missing field `version`"));
+    }
+
+    #[test]
+    fn registry_modpack_rejects_reserved_profile_environment() {
+        let error = parse_registry_modpack_manifest(
+            r#"
+version = "1.0.0"
+mods = []
+
+[options.run.env]
+BACKEND_ADDR = "https://unexpected.test"
+"#,
+            Path::new("packs/example.toml"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("managed by Patchwork"));
     }
 }

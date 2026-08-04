@@ -109,7 +109,8 @@ The final result is a normal Rust program.
 
 The desktop launcher is a trusted native host around an untrusted webview.
 
-The web frontend is a public client; server secrets remain in Actix.
+The web frontend is a public client; backend configuration secrets remain in
+Actix, while dynamic game server secrets remain only in each server process.
 
 The database is persistence plus final transactional invariants: HTTP handlers
 authenticate and authorize operations, while unique constraints and publish

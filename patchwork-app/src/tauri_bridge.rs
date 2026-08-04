@@ -1,7 +1,8 @@
 use crate::model::{
     DependencyPage, LauncherAuthStatus, LauncherCacheUsage, LauncherInstallResult, LauncherModpack,
     LauncherSettings, PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus,
-    RegistryDownloadEvent, RegistryInstallReport, SelectedIconFile,
+    ProfileOptions, ProfileOptionsView, RegistryDownloadEvent, RegistryInstallReport,
+    SelectedIconFile,
 };
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
@@ -271,6 +272,49 @@ pub(crate) async fn update_profile_metadata(
             profile_id,
             name,
             description,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn load_profile_options(
+    profile_id: &str,
+    build_mode: &str,
+) -> Result<ProfileOptionsView, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "profileId")]
+        profile_id: &'a str,
+        #[serde(rename = "buildMode")]
+        build_mode: &'a str,
+    }
+
+    invoke(
+        "load_profile_options",
+        &Args {
+            profile_id,
+            build_mode,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn update_profile_options(
+    profile_id: &str,
+    options: ProfileOptions,
+) -> Result<(), JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "profileId")]
+        profile_id: &'a str,
+        options: ProfileOptions,
+    }
+
+    invoke(
+        "update_profile_options",
+        &Args {
+            profile_id,
+            options,
         },
     )
     .await

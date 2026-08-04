@@ -273,3 +273,113 @@ CREATE TABLE github_oauth_states (
 
 CREATE INDEX github_oauth_states_account_idx ON github_oauth_states(account_uuid);
 CREATE INDEX github_oauth_states_expires_at_idx ON github_oauth_states(expires_at);
+
+CREATE TABLE game_server_instances (
+    server_id TEXT PRIMARY KEY NOT NULL CHECK (length(server_id) = 36),
+    secret_hash TEXT NOT NULL UNIQUE CHECK (length(secret_hash) = 64),
+    status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'closed')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMP NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    closed_at TIMESTAMP
+);
+
+CREATE INDEX game_server_instances_expires_at_idx ON game_server_instances(expires_at);
+
+CREATE TABLE game_launch_tickets (
+    ticket_hash TEXT PRIMARY KEY NOT NULL CHECK (length(ticket_hash) = 64),
+    account_uuid TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    consumed_at TIMESTAMP,
+    FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE CASCADE
+);
+
+CREATE INDEX game_launch_tickets_account_idx ON game_launch_tickets(account_uuid);
+CREATE INDEX game_launch_tickets_expires_at_idx ON game_launch_tickets(expires_at);
+
+CREATE TABLE game_process_sessions (
+    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+    token_hash TEXT NOT NULL UNIQUE CHECK (length(token_hash) = 64),
+    account_uuid TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    last_used_at TIMESTAMP,
+    revoked_at TIMESTAMP,
+    FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE CASCADE
+);
+
+CREATE INDEX game_process_sessions_account_idx ON game_process_sessions(account_uuid);
+CREATE INDEX game_process_sessions_expires_at_idx ON game_process_sessions(expires_at);
+
+CREATE TABLE game_player_sessions (
+    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+    account_uuid TEXT NOT NULL,
+    process_session_id TEXT NOT NULL,
+    current_server_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'disconnected')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    disconnected_at TIMESTAMP,
+    FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE CASCADE,
+    FOREIGN KEY (process_session_id) REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (current_server_id) REFERENCES game_server_instances(server_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX game_player_sessions_account_idx ON game_player_sessions(account_uuid);
+CREATE INDEX game_player_sessions_process_idx ON game_player_sessions(process_session_id);
+CREATE INDEX game_player_sessions_server_idx ON game_player_sessions(current_server_id);
+
+CREATE TABLE game_transfer_tickets (
+    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+    ticket_hash TEXT NOT NULL UNIQUE CHECK (length(ticket_hash) = 64),
+    player_session_id TEXT NOT NULL,
+    process_session_id TEXT NOT NULL,
+    account_uuid TEXT NOT NULL,
+    source_server_id TEXT NOT NULL,
+    target_server_id TEXT,
+    target_handshake_id TEXT UNIQUE,
+    status TEXT NOT NULL CHECK (status IN ('created', 'reserved', 'consumed', 'expired')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    reserved_at TIMESTAMP,
+    reservation_expires_at TIMESTAMP,
+    consumed_at TIMESTAMP,
+    FOREIGN KEY (player_session_id) REFERENCES game_player_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (process_session_id) REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE CASCADE,
+    FOREIGN KEY (source_server_id) REFERENCES game_server_instances(server_id) ON DELETE RESTRICT,
+    FOREIGN KEY (target_server_id) REFERENCES game_server_instances(server_id) ON DELETE RESTRICT,
+    CHECK (target_server_id IS NULL OR source_server_id <> target_server_id)
+);
+
+CREATE INDEX game_transfer_tickets_player_idx ON game_transfer_tickets(player_session_id);
+CREATE INDEX game_transfer_tickets_expires_at_idx ON game_transfer_tickets(expires_at);
+
+CREATE TABLE game_handshakes (
+    id TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 36),
+    protocol_version INTEGER NOT NULL CHECK (protocol_version BETWEEN 1 AND 65535),
+    server_id TEXT NOT NULL,
+    server_public_key TEXT NOT NULL CHECK (length(server_public_key) = 43),
+    server_nonce TEXT NOT NULL CHECK (length(server_nonce) = 43),
+    process_session_id TEXT,
+    account_uuid TEXT,
+    client_public_key TEXT CHECK (client_public_key IS NULL OR length(client_public_key) = 43),
+    client_nonce TEXT CHECK (client_nonce IS NULL OR length(client_nonce) = 43),
+    handshake_hash TEXT CHECK (handshake_hash IS NULL OR length(handshake_hash) = 43),
+    kind TEXT CHECK (kind IS NULL OR kind IN ('direct', 'transfer')),
+    transfer_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('waiting', 'authorized', 'consumed')),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    authorized_at TIMESTAMP,
+    consumed_at TIMESTAMP,
+    FOREIGN KEY (server_id) REFERENCES game_server_instances(server_id) ON DELETE CASCADE,
+    FOREIGN KEY (process_session_id) REFERENCES game_process_sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (account_uuid) REFERENCES accounts(uuid) ON DELETE CASCADE,
+    FOREIGN KEY (transfer_id) REFERENCES game_transfer_tickets(id) ON DELETE CASCADE
+);
+
+CREATE INDEX game_handshakes_server_idx ON game_handshakes(server_id);
+CREATE INDEX game_handshakes_expires_at_idx ON game_handshakes(expires_at);
+CREATE INDEX game_handshakes_process_idx ON game_handshakes(process_session_id);

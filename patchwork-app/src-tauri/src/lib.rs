@@ -2,7 +2,7 @@ use base64::{Engine, engine::general_purpose};
 use patchwork_registry_types::{RegistryBrowseRequest, RegistryProjectKind, RegistryProjectRef};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -13,6 +13,12 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(unix)]
+use std::{
+    fs::OpenOptions,
+    os::{fd::AsRawFd, unix::process::CommandExt},
+    process::{Command, Stdio},
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod assets;
@@ -20,6 +26,7 @@ mod auth;
 mod installer;
 mod model;
 mod paths;
+mod profile_options;
 mod registry;
 
 use assets::{
@@ -40,6 +47,7 @@ use paths::{
     is_valid_hex_color, non_empty_or, sanitize_build_mode, sanitize_existing_modpack_id,
     slugify_modpack_id,
 };
+use profile_options::{read_profile_options, validate_profile_options};
 
 #[tauri::command]
 fn select_folder() -> Option<String> {
@@ -533,6 +541,7 @@ fn create_modpack(
         modpacks: Vec::new(),
         ignore: Vec::new(),
         mods: Vec::new(),
+        options: patchwork::ProfileOptions::default(),
     };
     let toml = toml::to_string_pretty(&modpack).map_err(|error| error.to_string())?;
     fs::write(&path, toml)
@@ -700,6 +709,7 @@ fn toggle_profile_ignore(
         modpacks: Vec::new(),
         ignore: Vec::new(),
         mods: Vec::new(),
+        options: patchwork::ProfileOptions::default(),
     });
     if let Some(index) = profile.ignore.iter().position(|ignored| ignored == &mod_id) {
         profile.ignore.remove(index);
@@ -889,6 +899,8 @@ fn start_patchwork_action(
             expected.display()
         ));
     }
+    let profile_options = read_profile_options(&profile_path)?;
+    validate_profile_options(&profile_options)?;
 
     let tasks = state.tasks.clone();
     let download_running = state.download_running.clone();
@@ -959,6 +971,7 @@ fn start_patchwork_action(
             download_running,
             profile_id.clone(),
             profile_path,
+            profile_options,
             action.clone(),
             build_mode.clone(),
         );
@@ -1193,6 +1206,8 @@ pub fn run() {
             download_profile_dependencies,
             download_profile_updates,
             update_profile_metadata,
+            profile_options::load_profile_options,
+            profile_options::update_profile_options,
             create_modpack,
             import_modpack,
             delete_modpack,
@@ -1621,6 +1636,7 @@ fn run_patchwork_task(
     download_running: Arc<AtomicBool>,
     profile_id: String,
     profile_path: PathBuf,
+    profile_options: patchwork::ProfileOptions,
     action: String,
     build_mode: String,
 ) {
@@ -1718,6 +1734,7 @@ fn run_patchwork_task(
             &project_dir,
             &build_mode,
             &settings,
+            &profile_options.build,
         ) {
             match archive_built_executable(&settings, &profile_id, &build_mode) {
                 Ok(path) => emit_console_line(
@@ -1738,7 +1755,15 @@ fn run_patchwork_task(
             }
         }
     } else if action == "run" {
-        run_profile_executable(&app, tasks, &profile_id, &action, &settings, &build_mode);
+        run_profile_executable(
+            &app,
+            tasks,
+            &profile_id,
+            &action,
+            &settings,
+            &build_mode,
+            &profile_options.run,
+        );
     }
 }
 
@@ -1750,6 +1775,7 @@ fn run_cargo_build(
     project_dir: &Path,
     build_mode: &str,
     settings: &LauncherSettings,
+    options: &patchwork::ProcessOptions,
 ) -> bool {
     if !project_dir.join("Cargo.toml").is_file() {
         emit_console_line(
@@ -1790,11 +1816,17 @@ fn run_cargo_build(
     if build_mode == "release" {
         command.arg("--release");
     }
+    for argument in &options.args {
+        command.arg(argument);
+    }
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("CARGO_TERM_COLOR", "always");
     if !settings.cargo_target_dir.trim().is_empty() {
         command.env("CARGO_TARGET_DIR", &settings.cargo_target_dir);
+    }
+    for (name, value) in &options.env {
+        command.env(name, value);
     }
 
     emit_console_line(
@@ -1803,12 +1835,13 @@ fn run_cargo_build(
         profile_id,
         action,
         &format!(
-            "[build] Command: cargo build{}",
+            "[build] Command: cargo build{}{}",
             if build_mode == "release" {
                 " --release"
             } else {
                 ""
-            }
+            },
+            format_command_arguments(&options.args),
         ),
     );
     if !settings.cargo_target_dir.trim().is_empty() {
@@ -1821,7 +1854,21 @@ fn run_cargo_build(
         );
     }
 
-    run_pty_process(app, tasks, profile_id, action, "build", command)
+    run_pty_process(
+        app,
+        tasks,
+        profile_id,
+        action,
+        "build",
+        ProcessLaunch::Command(command),
+    )
+}
+
+fn format_command_arguments(arguments: &[String]) -> String {
+    arguments
+        .iter()
+        .map(|argument| format!(" {argument:?}"))
+        .collect()
 }
 
 fn run_profile_executable(
@@ -1831,6 +1878,7 @@ fn run_profile_executable(
     action: &str,
     settings: &LauncherSettings,
     build_mode: &str,
+    options: &patchwork::ProcessOptions,
 ) -> bool {
     let executable = executable_path(settings, profile_id, build_mode);
     if !executable.is_file() {
@@ -1847,29 +1895,233 @@ fn run_profile_executable(
         return false;
     }
 
+    if let Err(error) = sync_cached_assets_link(settings, profile_id, build_mode) {
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            &format!("[run] Failed to prepare assets: {error}"),
+        );
+        return false;
+    }
+
     let mut command = CommandBuilder::new(executable.as_os_str());
-    let project_dir = Path::new(&settings.build_cache).join(profile_id);
-    let working_dir = if project_dir.is_dir() {
-        project_dir
-    } else {
-        executable
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."))
-    };
+    for argument in &options.args {
+        command.arg(argument);
+    }
+    let working_dir = executable
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     command.cwd(working_dir.as_os_str());
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
-    command.env("BEVY_ASSET_ROOT", working_dir.as_os_str());
     command.env("BACKEND_ADDR", &settings.backend);
+    for (name, value) in &options.env {
+        command.env(name, value);
+    }
+    let launch_ticket = match request_game_launch_ticket(app) {
+        Ok(ticket) => ticket,
+        Err(error) => {
+            emit_console_line_with_error(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[auth] Failed: {error}"),
+                Some(error),
+            );
+            return false;
+        }
+    };
     emit_console_line(
         app,
         &tasks,
         profile_id,
         action,
-        &format!("[run] Command: {}", executable.display()),
+        &format!(
+            "[run] Command: {}{}",
+            executable.display(),
+            format_command_arguments(&options.args)
+        ),
     );
-    run_pty_process(app, tasks, profile_id, action, "run", command)
+    let launch = if let Some(ticket) = launch_ticket {
+        #[cfg(unix)]
+        {
+            ProcessLaunch::AuthenticatedGame(AuthenticatedGameLaunch {
+                executable,
+                working_dir,
+                backend: settings.backend.clone(),
+                args: options.args.clone(),
+                env: options.env.clone(),
+                ticket,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            emit_console_line_with_error(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                "[auth] Failed: authenticated game launch is not supported on this platform.",
+                Some("authenticated game launch is not supported on this platform".to_owned()),
+            );
+            return false;
+        }
+    } else {
+        ProcessLaunch::Command(command)
+    };
+    run_pty_process(app, tasks, profile_id, action, "run", launch)
+}
+
+enum ProcessLaunch {
+    Command(CommandBuilder),
+    #[cfg(unix)]
+    AuthenticatedGame(AuthenticatedGameLaunch),
+}
+
+#[cfg(unix)]
+struct AuthenticatedGameLaunch {
+    executable: PathBuf,
+    working_dir: PathBuf,
+    backend: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    ticket: String,
+}
+
+#[derive(serde::Deserialize)]
+struct GameLaunchTicketResponse {
+    launch_ticket: String,
+}
+
+fn request_game_launch_ticket(app: &AppHandle) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
+    let (server_url, access_token) = {
+        let auth = state
+            .auth
+            .lock()
+            .map_err(|_| "auth lock is poisoned".to_owned())?;
+        (auth.server_url.clone(), auth.access_token.clone())
+    };
+    let Some(access_token) = access_token else {
+        return Ok(None);
+    };
+
+    let url = auth::endpoint_url(&server_url, "/game/launch-ticket")?;
+    let response = ureq::post(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .call()
+        .map_err(game_auth_http_error)?
+        .into_json::<GameLaunchTicketResponse>()
+        .map_err(|error| format!("invalid launch ticket response: {error}"))?;
+    let decoded = general_purpose::URL_SAFE_NO_PAD
+        .decode(&response.launch_ticket)
+        .map_err(|_| "backend returned a malformed launch ticket".to_owned())?;
+    if decoded.len() != 32 {
+        return Err("backend returned a launch ticket with an invalid length".to_owned());
+    }
+    Ok(Some(response.launch_ticket))
+}
+
+fn game_auth_http_error(error: ureq::Error) -> String {
+    match error {
+        ureq::Error::Status(status, response) => response
+            .into_json::<serde_json::Value>()
+            .ok()
+            .and_then(|body| {
+                body.get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| format!("backend rejected launch ticket request ({status})")),
+        ureq::Error::Transport(error) => format!("could not reach Patchwork backend: {error}"),
+    }
+}
+
+#[cfg(unix)]
+fn spawn_authenticated_game_process(
+    pair: &portable_pty::PtyPair,
+    launch: AuthenticatedGameLaunch,
+) -> Result<Box<dyn portable_pty::Child + Send + Sync>, String> {
+    let terminal_path = pair
+        .master
+        .tty_name()
+        .ok_or_else(|| "PTY does not expose its slave terminal".to_owned())?;
+    let terminal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&terminal_path)
+        .map_err(|error| {
+            format!(
+                "failed to open PTY slave '{}': {error}",
+                terminal_path.display()
+            )
+        })?;
+    let terminal_stdin = terminal
+        .try_clone()
+        .map_err(|error| format!("failed to clone PTY stdin: {error}"))?;
+    let terminal_stdout = terminal
+        .try_clone()
+        .map_err(|error| format!("failed to clone PTY stdout: {error}"))?;
+    let (ticket_reader, mut ticket_writer) =
+        os_pipe::pipe().map_err(|error| format!("failed to create auth pipe: {error}"))?;
+    let ticket_reader_fd = ticket_reader.as_raw_fd();
+
+    let mut command = Command::new(&launch.executable);
+    command
+        .current_dir(&launch.working_dir)
+        .args(&launch.args)
+        .stdin(Stdio::from(terminal_stdin))
+        .stdout(Stdio::from(terminal_stdout))
+        .stderr(Stdio::from(terminal))
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("BACKEND_ADDR", &launch.backend)
+        .env("PATCHWORK_AUTH_FD", "3")
+        .env("PATCHWORK_AUTH_PIPE_VERSION", "1")
+        .envs(&launch.env);
+
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if ticket_reader_fd != 3 && libc::dup2(ticket_reader_fd, 3) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            let flags = libc::fcntl(3, libc::F_GETFD);
+            if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start authenticated game process: {error}"))?;
+    drop(ticket_reader);
+    let ticket = launch.ticket.as_bytes();
+    let length = u32::try_from(ticket.len())
+        .map_err(|_| "launch ticket is too large for the auth pipe".to_owned())?;
+    if let Err(error) = ticket_writer
+        .write_all(&length.to_be_bytes())
+        .and_then(|()| ticket_writer.write_all(ticket))
+        .and_then(|()| ticket_writer.flush())
+    {
+        let _ = child.kill();
+        return Err(format!(
+            "failed to write launch ticket to auth pipe: {error}"
+        ));
+    }
+    drop(ticket_writer);
+    Ok(Box::new(child))
 }
 
 fn run_pty_process(
@@ -1878,7 +2130,7 @@ fn run_pty_process(
     profile_id: &str,
     action: &str,
     process_label: &str,
-    command: CommandBuilder,
+    launch: ProcessLaunch,
 ) -> bool {
     let initial_size = tasks
         .lock()
@@ -1929,7 +2181,15 @@ fn run_pty_process(
         }
     };
 
-    let child = match pair.slave.spawn_command(command) {
+    let child = match launch {
+        ProcessLaunch::Command(command) => pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| error.to_string()),
+        #[cfg(unix)]
+        ProcessLaunch::AuthenticatedGame(launch) => spawn_authenticated_game_process(&pair, launch),
+    };
+    let child = match child {
         Ok(child) => child,
         Err(error) => {
             emit_console_line(
@@ -2309,6 +2569,7 @@ fn archive_built_executable(
 
     if fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         if source.canonicalize().ok() == destination.canonicalize().ok() && destination.is_file() {
+            sync_cached_assets_link(settings, profile_id, build_mode)?;
             return Ok(destination);
         }
         fs::remove_file(&source).map_err(|error| {
@@ -2374,7 +2635,67 @@ fn archive_built_executable(
         )
     })?;
     create_executable_symlink(&destination, &source)?;
+    sync_cached_assets_link(settings, profile_id, build_mode)?;
     Ok(destination)
+}
+
+fn sync_cached_assets_link(
+    settings: &LauncherSettings,
+    profile_id: &str,
+    build_mode: &str,
+) -> Result<(), String> {
+    let source = Path::new(&settings.build_cache)
+        .join(profile_id)
+        .join("assets");
+    let executable = executable_path(settings, profile_id, build_mode);
+    let parent = executable
+        .parent()
+        .ok_or_else(|| "Binary cache executable has no parent directory".to_owned())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create binary cache directory '{}': {error}",
+            parent.display()
+        )
+    })?;
+    let link = parent.join("assets");
+
+    match fs::symlink_metadata(&link) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if source.is_dir() && link.canonicalize().ok() == source.canonicalize().ok() {
+                return Ok(());
+            }
+            fs::remove_file(&link).map_err(|error| {
+                format!(
+                    "Failed to remove stale assets symlink '{}': {error}",
+                    link.display()
+                )
+            })?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "Refusing to replace non-symlink assets path '{}'",
+                link.display()
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "Failed to inspect assets path '{}': {error}",
+                link.display()
+            ));
+        }
+    }
+
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let source = source.canonicalize().map_err(|error| {
+        format!(
+            "Failed to canonicalize composed assets '{}': {error}",
+            source.display()
+        )
+    })?;
+    create_directory_symlink(&source, &link)
 }
 
 #[cfg(unix)]
@@ -2382,6 +2703,28 @@ fn create_executable_symlink(destination: &Path, link: &Path) -> Result<(), Stri
     std::os::unix::fs::symlink(destination, link).map_err(|error| {
         format!(
             "Failed to create executable symlink '{}' -> '{}': {error}",
+            link.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(destination: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(destination, link).map_err(|error| {
+        format!(
+            "Failed to create assets symlink '{}' -> '{}': {error}",
+            link.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(destination: &Path, link: &Path) -> Result<(), String> {
+    std::os::windows::fs::symlink_dir(destination, link).map_err(|error| {
+        format!(
+            "Failed to create assets symlink '{}' -> '{}': {error}",
             link.display(),
             destination.display()
         )
@@ -2442,6 +2785,8 @@ mod tests {
 
         let project_dir = Path::new(&settings.build_cache).join("example-profile");
         fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(project_dir.join("assets")).unwrap();
+        fs::write(project_dir.join("assets/example.txt"), b"asset").unwrap();
         fs::write(
             project_dir.join("Cargo.toml"),
             "[package]\nname = \"example-game\"\nversion = \"0.1.0\"\n",
@@ -2464,5 +2809,13 @@ mod tests {
             cargo_executable.canonicalize().unwrap(),
             cached.canonicalize().unwrap()
         );
+        let assets = cached.parent().unwrap().join("assets");
+        assert!(
+            fs::symlink_metadata(&assets)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(assets.join("example.txt")).unwrap(), b"asset");
     }
 }

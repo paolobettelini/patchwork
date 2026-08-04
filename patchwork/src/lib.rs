@@ -16,7 +16,8 @@ pub use browser::{
 };
 pub use error::{PatchworkError, Result};
 pub use model::{
-    CodegenDeclaration, CodegenGenerator, Dependencies, ModInfo, Modpack, is_generated_mod_id,
+    CodegenDeclaration, CodegenGenerator, Dependencies, ModInfo, Modpack, ProcessOptions,
+    ProfileOptions, is_generated_mod_id,
 };
 pub use registry::{
     RegistryDependencyTargetKind, RegistryModManifest, RegistryModpackDependency,

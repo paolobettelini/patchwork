@@ -9,6 +9,7 @@ mod config;
 mod email;
 mod github;
 mod server_auth;
+mod server_game_auth;
 mod server_github;
 mod server_registry;
 
@@ -73,9 +74,12 @@ async fn main() -> std::io::Result<()> {
     };
     let database = Database::connect(&config.db_connection)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let email = email::EmailSender::new(config.email);
+    let email = email::EmailSender::new(config.email.clone());
     let auth_state = server_auth::AuthState::new(database, email, args.secure_cookies);
-    let github = github::GithubClient::new(config.github).map_err(std::io::Error::other)?;
+    let game_auth_state =
+        server_game_auth::GameAuthState::new(auth_state.database().clone(), &config.game_auth);
+    server_game_auth::spawn_cleanup(game_auth_state.clone());
+    let github = github::GithubClient::new(config.github.clone()).map_err(std::io::Error::other)?;
     let github_state = server_github::GithubState::new(
         auth_state.database().clone(),
         github.clone(),
@@ -89,8 +93,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth_state.clone()))
             .app_data(web::Data::new(github_state.clone()))
             .app_data(web::Data::new(registry_state.clone()))
+            .app_data(web::Data::new(game_auth_state.clone()))
             .configure(server_auth::configure)
             .configure(server_github::configure)
+            .configure(server_game_auth::configure)
             .configure(server_registry::configure)
             .route("/pkg/patchwork_web_bg.wasm", web::route().to(wasm))
             .service(Files::new("/pkg", files.root.join("pkg")))

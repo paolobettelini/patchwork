@@ -21,6 +21,7 @@
 - [Desktop launcher](./desktop_launcher.md)
 - [Web service](./web_service.md)
 - [Accounts and authentication](./authentication.md)
+- [Game authentication and server transfer](./game_authentication.md)
 - [GitHub integration](./github_integration.md)
 - [Registry publication](./registry_publication.md)
 - [Registry browsing](./registry_browsing.md)

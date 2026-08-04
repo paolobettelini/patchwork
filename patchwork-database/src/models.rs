@@ -5,10 +5,11 @@ use uuid::Uuid;
 
 use crate::error::{DatabaseError, Result};
 use crate::schema::{
-    accounts, app_tokens, github_accounts, github_oauth_states, mod_version_dependencies,
-    mod_versions, modpack_version_dependencies, modpack_versions, modpacks, mods,
-    oauth_authorization_codes, pending_registrations, registry_scan_entries, registry_scans,
-    repositories, web_sessions,
+    accounts, app_tokens, game_handshakes, game_launch_tickets, game_player_sessions,
+    game_process_sessions, game_server_instances, game_transfer_tickets, github_accounts,
+    github_oauth_states, mod_version_dependencies, mod_versions, modpack_version_dependencies,
+    modpack_versions, modpacks, mods, oauth_authorization_codes, pending_registrations,
+    registry_scan_entries, registry_scans, repositories, web_sessions,
 };
 
 #[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
@@ -429,6 +430,115 @@ pub struct GithubOAuthState {
     pub used_at: Option<NaiveDateTime>,
 }
 
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_server_instances)]
+#[diesel(primary_key(server_id))]
+pub struct GameServerInstance {
+    pub server_id: String,
+    pub secret_hash: String,
+    pub status: String,
+    pub created_at: NaiveDateTime,
+    pub last_seen_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+    pub closed_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_launch_tickets)]
+#[diesel(primary_key(ticket_hash))]
+pub struct GameLaunchTicket {
+    pub ticket_hash: String,
+    pub account_uuid: String,
+    pub created_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+    pub consumed_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_process_sessions)]
+pub struct GameProcessSession {
+    pub id: String,
+    pub token_hash: String,
+    pub account_uuid: String,
+    pub created_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+    pub last_used_at: Option<NaiveDateTime>,
+    pub revoked_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_player_sessions)]
+pub struct GamePlayerSession {
+    pub id: String,
+    pub account_uuid: String,
+    pub process_session_id: String,
+    pub current_server_id: String,
+    pub status: String,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+    pub disconnected_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_transfer_tickets)]
+pub struct GameTransferTicket {
+    pub id: String,
+    pub ticket_hash: String,
+    pub player_session_id: String,
+    pub process_session_id: String,
+    pub account_uuid: String,
+    pub source_server_id: String,
+    pub target_server_id: Option<String>,
+    pub target_handshake_id: Option<String>,
+    pub status: String,
+    pub created_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+    pub reserved_at: Option<NaiveDateTime>,
+    pub reservation_expires_at: Option<NaiveDateTime>,
+    pub consumed_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Queryable, Selectable, Identifiable, Serialize, Deserialize)]
+#[diesel(table_name = game_handshakes)]
+pub struct GameHandshake {
+    pub id: String,
+    pub protocol_version: i32,
+    pub server_id: String,
+    pub server_public_key: String,
+    pub server_nonce: String,
+    pub process_session_id: Option<String>,
+    pub account_uuid: Option<String>,
+    pub client_public_key: Option<String>,
+    pub client_nonce: Option<String>,
+    pub handshake_hash: Option<String>,
+    pub kind: Option<String>,
+    pub transfer_id: Option<String>,
+    pub status: String,
+    pub created_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+    pub authorized_at: Option<NaiveDateTime>,
+    pub consumed_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedGameProcess {
+    pub session: GameProcessSession,
+    pub account: Account,
+}
+
+#[derive(Debug, Clone)]
+pub struct GameAdmission {
+    pub player_session: GamePlayerSession,
+    pub account: Account,
+    pub admission: String,
+    pub source_server_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedGameTransfer {
+    pub transfer: GameTransferTicket,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Pagination {
     pub limit: i64,
@@ -668,5 +778,70 @@ pub(crate) struct NewGithubOAuthStateRow<'a> {
     pub state_hash: &'a str,
     pub account_uuid: &'a str,
     pub completion_url: &'a str,
+    pub expires_at: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_server_instances)]
+pub(crate) struct NewGameServerInstanceRow<'a> {
+    pub server_id: &'a str,
+    pub secret_hash: &'a str,
+    pub status: &'a str,
+    pub last_seen_at: NaiveDateTime,
+    pub expires_at: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_launch_tickets)]
+pub(crate) struct NewGameLaunchTicketRow<'a> {
+    pub ticket_hash: &'a str,
+    pub account_uuid: &'a str,
+    pub expires_at: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_process_sessions)]
+pub(crate) struct NewGameProcessSessionRow<'a> {
+    pub id: &'a str,
+    pub token_hash: &'a str,
+    pub account_uuid: &'a str,
+    pub expires_at: NaiveDateTime,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_player_sessions)]
+pub(crate) struct NewGamePlayerSessionRow<'a> {
+    pub id: &'a str,
+    pub account_uuid: &'a str,
+    pub process_session_id: &'a str,
+    pub current_server_id: &'a str,
+    pub status: &'a str,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_transfer_tickets)]
+pub(crate) struct NewGameTransferTicketRow<'a> {
+    pub id: &'a str,
+    pub ticket_hash: &'a str,
+    pub player_session_id: &'a str,
+    pub process_session_id: &'a str,
+    pub account_uuid: &'a str,
+    pub source_server_id: &'a str,
+    pub target_server_id: Option<&'a str>,
+    pub target_handshake_id: Option<&'a str>,
+    pub status: &'a str,
+    pub expires_at: NaiveDateTime,
+    pub reservation_expires_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Insertable)]
+#[diesel(table_name = game_handshakes)]
+pub(crate) struct NewGameHandshakeRow<'a> {
+    pub id: &'a str,
+    pub protocol_version: i32,
+    pub server_id: &'a str,
+    pub server_public_key: &'a str,
+    pub server_nonce: &'a str,
+    pub status: &'a str,
     pub expires_at: NaiveDateTime,
 }

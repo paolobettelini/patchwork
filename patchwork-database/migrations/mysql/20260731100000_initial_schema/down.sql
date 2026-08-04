@@ -1,3 +1,9 @@
+DROP TABLE IF EXISTS game_handshakes;
+DROP TABLE IF EXISTS game_transfer_tickets;
+DROP TABLE IF EXISTS game_player_sessions;
+DROP TABLE IF EXISTS game_process_sessions;
+DROP TABLE IF EXISTS game_launch_tickets;
+DROP TABLE IF EXISTS game_server_instances;
 DROP TABLE IF EXISTS github_oauth_states;
 DROP TABLE IF EXISTS github_accounts;
 DROP TABLE IF EXISTS app_tokens;

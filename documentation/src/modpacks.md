@@ -36,10 +36,47 @@ Supported generic fields:
 - `color`: optional color used by the launcher when the modpack is selected;
 - `modpacks`: other modpacks to import;
 - `mods`: explicitly selected mods;
-- `ignore`: mods to remove from the imported tree.
+- `ignore`: mods to remove from the imported tree;
+- `options`: optional per-profile process environment and arguments used by the
+  desktop launcher.
 
 `name`, `description`, and `color` are descriptive metadata. They help the
 launcher and browser, but they do not change graph resolution.
+
+## Profile process options
+
+A modpack can carry build and executable options. They become active when that
+TOML file is installed or opened as a desktop profile:
+
+```toml
+[options.build]
+args = ["--config", "/absolute/path/to/mods/.cargo/config.toml"]
+
+[options.build.env]
+RUST_LOG = "debug"
+
+[options.run]
+args = ["--connect", "127.0.0.1:25565"]
+
+[options.run.env]
+GAME_LOG = "trace"
+```
+
+Every item in `args` is one process argument. Patchwork does not split a shell
+command, expand variables, or interpret quotes. Build arguments are appended to
+`cargo build` after launcher-managed arguments such as `--release`; run
+arguments are passed to the cached executable.
+
+The `env` tables contain only custom values. Launcher-managed variables remain
+visible as read-only rows in the profile's **Options** tab and cannot be
+overridden. The registry rejects published modpacks that attempt such an
+override. Empty `options` are omitted when the launcher writes the profile.
+
+Options belong to the root profile being built or run. Imported modpacks do not
+merge their process options into the parent profile. This keeps command-line
+behavior deterministic when multiple modpacks are combined. A published
+modpack still retains its options, so **Download as profile** preserves them;
+adding it as a dependency of an existing profile does not activate them.
 
 ## Imported modpacks
 
@@ -131,9 +168,10 @@ crates depending on the metadata present in each modpack.
 
 ## Icons and favicons
 
-The core treats `name`, `version`, `description`, `color`, `modpacks`, `mods`, and `ignore`
-as modpack metadata. The launcher also uses a filesystem convention to show
-icons without putting binary data in TOML:
+The core treats `name`, `version`, `description`, `color`, `modpacks`, `mods`,
+`ignore`, and `options` as modpack metadata. Process options do not affect graph
+resolution or composition. The launcher also uses a filesystem convention to
+show icons without putting binary data in TOML:
 
 - a profile/modpack `client.toml` can have `client.png`, `client.jpg`,
   `client.jpeg`, `client.webp`, or `client.gif` next to it;

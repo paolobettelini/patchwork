@@ -231,6 +231,94 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    game_server_instances (server_id) {
+        server_id -> Text,
+        secret_hash -> Text,
+        status -> Text,
+        created_at -> Timestamp,
+        last_seen_at -> Timestamp,
+        expires_at -> Timestamp,
+        closed_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    game_launch_tickets (ticket_hash) {
+        ticket_hash -> Text,
+        account_uuid -> Text,
+        created_at -> Timestamp,
+        expires_at -> Timestamp,
+        consumed_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    game_process_sessions (id) {
+        id -> Text,
+        token_hash -> Text,
+        account_uuid -> Text,
+        created_at -> Timestamp,
+        expires_at -> Timestamp,
+        last_used_at -> Nullable<Timestamp>,
+        revoked_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    game_player_sessions (id) {
+        id -> Text,
+        account_uuid -> Text,
+        process_session_id -> Text,
+        current_server_id -> Text,
+        status -> Text,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+        disconnected_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    game_transfer_tickets (id) {
+        id -> Text,
+        ticket_hash -> Text,
+        player_session_id -> Text,
+        process_session_id -> Text,
+        account_uuid -> Text,
+        source_server_id -> Text,
+        target_server_id -> Nullable<Text>,
+        target_handshake_id -> Nullable<Text>,
+        status -> Text,
+        created_at -> Timestamp,
+        expires_at -> Timestamp,
+        reserved_at -> Nullable<Timestamp>,
+        reservation_expires_at -> Nullable<Timestamp>,
+        consumed_at -> Nullable<Timestamp>,
+    }
+}
+
+diesel::table! {
+    game_handshakes (id) {
+        id -> Text,
+        protocol_version -> Integer,
+        server_id -> Text,
+        server_public_key -> Text,
+        server_nonce -> Text,
+        process_session_id -> Nullable<Text>,
+        account_uuid -> Nullable<Text>,
+        client_public_key -> Nullable<Text>,
+        client_nonce -> Nullable<Text>,
+        handshake_hash -> Nullable<Text>,
+        kind -> Nullable<Text>,
+        transfer_id -> Nullable<Text>,
+        status -> Text,
+        created_at -> Timestamp,
+        expires_at -> Timestamp,
+        authorized_at -> Nullable<Timestamp>,
+        consumed_at -> Nullable<Timestamp>,
+    }
+}
+
 diesel::joinable!(mods -> accounts (publisher_uuid));
 diesel::joinable!(mods -> repositories (repository_id));
 diesel::joinable!(mod_versions -> mods (mod_id));
@@ -246,6 +334,8 @@ diesel::joinable!(oauth_authorization_codes -> accounts (account_uuid));
 diesel::joinable!(app_tokens -> accounts (account_uuid));
 diesel::joinable!(github_accounts -> accounts (account_uuid));
 diesel::joinable!(github_oauth_states -> accounts (account_uuid));
+diesel::joinable!(game_launch_tickets -> accounts (account_uuid));
+diesel::joinable!(game_process_sessions -> accounts (account_uuid));
 
 diesel::allow_tables_to_appear_in_same_query!(
     accounts,
@@ -264,4 +354,10 @@ diesel::allow_tables_to_appear_in_same_query!(
     github_accounts,
     github_oauth_states,
     pending_registrations,
+    game_server_instances,
+    game_launch_tickets,
+    game_process_sessions,
+    game_player_sessions,
+    game_transfer_tickets,
+    game_handshakes,
 );
