@@ -80,13 +80,50 @@ Patchwork projects.
 
 For a desktop development profile, a practical setup is:
 
-1. Point **Mod cache** at the checkout's `mods/` directory.
-2. Point **Modpack cache** at the checkout's `modpacks/` directory.
-3. Add the checkout, or the appropriate project folder, to **Registries / Local
+1. Replace the default mod and modpack cache directories with symbolic links to
+   the development checkout. For example, preserving the existing downloaded
+   caches as backups:
+
+   ```bash
+   PATCHWORK_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/patchwork"
+
+   rm -rf "$PATCHWORK_DATA/cache/mods" && ln -s /some/local/mods "$PATCHWORK_DATA/cache"
+   rm -rf "$PATCHWORK_DATA/cache/modpacks" && ln -s /some/local/modpacks "$PATCHWORK_DATA/cache"
+   ```
+
+   The launcher's
+   cache clear actions intentionally refuse to delete symbolic-link targets.
+2. Add `/some/local`, or the appropriate checkout root, to **Registries / Local
    folders** so Browse resolves development projects locally before the remote
    registry.
-4. Open the profile's **Options** tab and add one compilation argument row:
-   `--config /absolute/path/to/mods/.cargo/config.toml`.
+3. Open the profile's **Options** tab and add one compilation argument row:
+   `--config /some/local/mods/.cargo/config.toml`.
+
+Patchwork mods are downloaded and composed as complete crate directories, but
+ordinary Rust libraries are not Patchwork registry projects and are not
+downloaded together with the mods. Their distributable `Cargo.toml`
+dependencies should therefore use a Git address. During local development it
+is useful to keep using the adjacent library checkout instead.
+
+For a Modularis checkout, copy
+[`scripts/sync-modularis-deps.sh`](../../scripts/sync-modularis-deps.sh) into
+`mods/.cargo/` and run it there:
+
+```bash
+mkdir -p /some/local/mods/.cargo
+cp /path/to/modding_system/scripts/sync-modularis-deps.sh /some/local/mods/.cargo/
+chmod +x /some/local/mods/.cargo/sync-modularis-deps.sh
+
+/some/local/mods/.cargo/sync-modularis-deps.sh --dry-run
+/some/local/mods/.cargo/sync-modularis-deps.sh
+```
+
+The script is specific to the Modularis Git repository. It scans the crates
+directly below `mods/`, keeps dependencies on Patchwork mods as sibling `path`
+dependencies, rewrites dependencies on plain libraries to the remote Git
+address, and generates `mods/.cargo/config.toml` with local `[patch]` entries
+for those libraries. Because it can rewrite the child `Cargo.toml` files, review
+the `--dry-run` output before applying it.
 
 The explicit config argument matters because Cargo Build runs with the composed
 project as its working directory. Cargo would not discover a `.cargo` directory
