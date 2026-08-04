@@ -124,7 +124,6 @@ pub fn run_tasks(
         if let Some(dev_crate_dir) = &task.dev_crate_dir {
             command.arg("--dev-crate").arg(dev_crate_dir);
         }
-
         let status = match command.status() {
             Ok(status) => status,
             Err(source) => {

@@ -1,7 +1,7 @@
 use crate::model::{
-    DependencyPage, LauncherAuthStatus, LauncherInstallResult, LauncherModpack, LauncherSettings,
-    PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus, RegistryDownloadEvent,
-    RegistryInstallReport, SelectedIconFile,
+    DependencyPage, LauncherAuthStatus, LauncherCacheUsage, LauncherInstallResult, LauncherModpack,
+    LauncherSettings, PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus,
+    RegistryDownloadEvent, RegistryInstallReport, SelectedIconFile,
 };
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
@@ -31,6 +31,19 @@ pub(crate) async fn select_icon_file() -> Result<Option<SelectedIconFile>, JsVal
 
 pub(crate) async fn load_launcher_settings() -> Result<LauncherSettings, JsValue> {
     invoke("load_launcher_settings", &()).await
+}
+
+pub(crate) async fn launcher_cache_usage() -> Result<LauncherCacheUsage, JsValue> {
+    invoke("launcher_cache_usage", &()).await
+}
+
+pub(crate) async fn clear_launcher_cache(cache: &str) -> Result<LauncherCacheUsage, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        cache: &'a str,
+    }
+
+    invoke("clear_launcher_cache", &Args { cache }).await
 }
 
 pub(crate) async fn auth_status() -> Result<LauncherAuthStatus, JsValue> {
@@ -149,17 +162,6 @@ pub(crate) async fn registry_publish_scan(
     }
 
     invoke("registry_publish_scan", &Args { scan_id, input }).await
-}
-
-pub(crate) async fn registry_start_rescan(
-    project: &RegistryProjectRef,
-) -> Result<RegistryScanJobStarted, JsValue> {
-    #[derive(Serialize)]
-    struct Args<'a> {
-        project: &'a RegistryProjectRef,
-    }
-
-    invoke("registry_start_rescan", &Args { project }).await
 }
 
 pub(crate) async fn update_launcher_path(

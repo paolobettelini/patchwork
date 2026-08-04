@@ -2,7 +2,7 @@ book
 target
 temp
 cache
-documentation
+#documentation
 *.sqlite
 *.pem
 

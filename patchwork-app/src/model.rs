@@ -30,7 +30,17 @@ pub(crate) struct LauncherSettings {
     #[serde(alias = "modpacksDir")]
     pub(crate) profiles_dir: String,
     pub(crate) build_cache: String,
+    pub(crate) bin_cache: String,
     pub(crate) settings_file: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherCacheUsage {
+    pub(crate) cargo_cache_bytes: u64,
+    pub(crate) target_cache_bytes: u64,
+    pub(crate) build_cache_bytes: u64,
+    pub(crate) bin_cache_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

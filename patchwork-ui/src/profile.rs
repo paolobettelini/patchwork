@@ -1,5 +1,7 @@
 use leptos::prelude::*;
-use patchwork_registry_types::{RegistryProjectKind, RegistryProjectRef, is_generated_mod_id};
+use patchwork_registry_types::{
+    RegistryProjectKind, RegistryProjectRef, RegistryScanRequest, is_generated_mod_id,
+};
 
 use crate::icons::{RefreshCwIcon, UploadIcon, UserIcon};
 
@@ -16,6 +18,27 @@ pub struct PublishedProject {
     pub can_rescan: bool,
 }
 
+impl PublishedProject {
+    pub fn rescan_request(&self) -> Option<RegistryScanRequest> {
+        let repository_url = self.repository_url.clone()?;
+        let repository_path = self.repository_path.clone()?;
+        let base_path = if self.project_kind == RegistryProjectKind::Modpack {
+            let manifest = format!("{}.toml", self.id);
+            if repository_path.is_empty() || repository_path == "." {
+                manifest
+            } else {
+                format!("{}/{manifest}", repository_path.trim_end_matches('/'))
+            }
+        } else {
+            repository_path
+        };
+        Some(RegistryScanRequest {
+            repository_url,
+            base_path,
+        })
+    }
+}
+
 #[component]
 pub fn ProfilePage(
     account_email: String,
@@ -23,8 +46,7 @@ pub fn ProfilePage(
     mods: Vec<PublishedProject>,
     modpacks: Vec<PublishedProject>,
     on_open_project: Callback<RegistryProjectRef>,
-    on_rescan: Callback<RegistryProjectRef>,
-    rescan_pending: Signal<Option<String>>,
+    on_rescan: Callback<PublishedProject>,
     children: Children,
 ) -> impl IntoView {
     let total_downloads = mods
@@ -63,8 +85,8 @@ pub fn ProfilePage(
             {github_connection}
 
             <section class="profile-published-grid">
-                <PublishedSection title="Mods" projects=mods on_open_project on_rescan rescan_pending />
-                <PublishedSection title="Modpacks" projects=modpacks on_open_project on_rescan rescan_pending />
+                <PublishedSection title="Mods" projects=mods on_open_project on_rescan />
+                <PublishedSection title="Modpacks" projects=modpacks on_open_project on_rescan />
             </section>
         </div>
     }
@@ -75,8 +97,7 @@ fn PublishedSection(
     title: &'static str,
     projects: Vec<PublishedProject>,
     on_open_project: Callback<RegistryProjectRef>,
-    on_rescan: Callback<RegistryProjectRef>,
-    rescan_pending: Signal<Option<String>>,
+    on_rescan: Callback<PublishedProject>,
 ) -> impl IntoView {
     let projects_count = projects.len();
     let content = if projects.is_empty() {
@@ -95,12 +116,11 @@ fn PublishedSection(
                     each=move || projects.clone()
                     key=|project| project.id.clone()
                     children=move |project| {
-                        let project_id = project.id.clone();
                         let project_kind = project.project_kind;
                         let generated = project_kind == RegistryProjectKind::Mod
                             && is_generated_mod_id(&project.id);
-                        let pending_id = project.id.clone();
                         let open_id = project.id.clone();
+                        let rescan_project = project.clone();
                         let version = project.latest_version.clone();
                         let version_view = if let Some(version) = version {
                             view! { <span>{format!("Latest {version}")}</span> }.into_any()
@@ -112,19 +132,11 @@ fn PublishedSection(
                                 <button
                                     type="button"
                                     class="published-rescan-action"
-                                    title="Scan the current default branch"
-                                    disabled=move || rescan_pending.get().is_some()
-                                    on:click=move |_| on_rescan.run(RegistryProjectRef {
-                                        project_kind,
-                                        project_id: project_id.clone(),
-                                    })
+                                    title="Open this project in Upload"
+                                    on:click=move |_| on_rescan.run(rescan_project.clone())
                                 >
                                     <RefreshCwIcon />
-                                    <span>{move || if rescan_pending.get().as_deref() == Some(pending_id.as_str()) {
-                                        "Scanning"
-                                    } else {
-                                        "Rescan"
-                                    }}</span>
+                                    <span>"Rescan"</span>
                                 </button>
                             }
                             .into_any()

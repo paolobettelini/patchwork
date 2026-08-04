@@ -52,6 +52,7 @@ pub fn UploadPage(
     pending: Signal<bool>,
     error: Signal<Option<String>>,
     notice: Signal<Option<String>>,
+    prefill: Signal<Option<RegistryScanRequest>>,
     on_sign_in: Callback<()>,
     on_connect_github: Callback<()>,
     on_scan: Callback<RegistryScanRequest>,
@@ -62,6 +63,13 @@ pub fn UploadPage(
     let (base_path, set_base_path) = signal(String::new());
     let (selected_scan_id, set_selected_scan_id) = signal(None::<String>);
     let (selected_entries, set_selected_entries) = signal(HashSet::<String>::new());
+
+    Effect::new(move |_| {
+        if let Some(prefill) = prefill.get() {
+            set_repository_url.set(prefill.repository_url);
+            set_base_path.set(prefill.base_path);
+        }
+    });
 
     Effect::new(move |_| {
         let current = scan.get();

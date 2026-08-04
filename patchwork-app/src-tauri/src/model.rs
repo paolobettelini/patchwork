@@ -69,7 +69,18 @@ pub(crate) struct LauncherSettings {
     #[serde(default)]
     pub(crate) build_cache: String,
     #[serde(default)]
+    pub(crate) bin_cache: String,
+    #[serde(default)]
     pub(crate) settings_file: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LauncherCacheUsage {
+    pub(crate) cargo_cache_bytes: u64,
+    pub(crate) target_cache_bytes: u64,
+    pub(crate) build_cache_bytes: u64,
+    pub(crate) bin_cache_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -172,6 +183,7 @@ impl LauncherSettings {
             modpacks_cache: display_path(&cache_dir.join("modpacks")),
             profiles_dir: display_path(&patchwork_data.join("profiles")),
             build_cache: display_path(&cache_dir.join("build")),
+            bin_cache: display_path(&cache_dir.join("bin")),
             settings_file: display_path(&config_dir.join(SETTINGS_FILE)),
         }
     }
@@ -198,6 +210,9 @@ impl LauncherSettings {
         if self.build_cache.trim().is_empty() {
             self.build_cache = defaults.build_cache.clone();
         }
+        if self.bin_cache.trim().is_empty() {
+            self.bin_cache = defaults.bin_cache.clone();
+        }
         if self.settings_file.trim().is_empty() {
             self.settings_file = defaults.settings_file.clone();
         }
@@ -216,17 +231,19 @@ impl LauncherSettings {
         self.modpacks_cache = expand_env_vars(&self.modpacks_cache);
         self.profiles_dir = expand_env_vars(&self.profiles_dir);
         self.build_cache = expand_env_vars(&self.build_cache);
+        self.bin_cache = expand_env_vars(&self.bin_cache);
         self.settings_file = expand_env_vars(&self.settings_file);
         self
     }
 
-    pub(crate) fn directory_paths(&self) -> [&str; 5] {
+    pub(crate) fn directory_paths(&self) -> [&str; 6] {
         [
             &self.cargo_target_dir,
             &self.mod_cache,
             &self.modpacks_cache,
             &self.profiles_dir,
             &self.build_cache,
+            &self.bin_cache,
         ]
     }
 }

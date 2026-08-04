@@ -3,7 +3,7 @@ use patchwork_registry_types::{RegistryBrowseRequest, RegistryProjectKind, Regis
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -28,12 +28,12 @@ use assets::{
 };
 use model::{
     AUTH_FILE, AppState, CONFIG_DIR, DEFAULT_DESCRIPTION, DEFAULT_TERMINAL_COLS,
-    DEFAULT_TERMINAL_ROWS, LauncherDependencyPage, LauncherInstallResult, LauncherModpack,
-    LauncherModpackToml, LauncherSettings, MAX_CONSOLE_SNAPSHOT_BYTES, NewModpackToml,
-    PATCHWORK_AUTH_EVENT, PATCHWORK_CONSOLE_EVENT, PatchworkAuthEvent, PatchworkConsoleChunk,
-    PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus, RegistryDownloadEvent,
-    RegistryDownloadStatus, RegistryInstallReport, SETTINGS_FILE, SETTINGS_POINTER_FILE,
-    SelectedIconFile, SettingsPointer,
+    DEFAULT_TERMINAL_ROWS, LauncherCacheUsage, LauncherDependencyPage, LauncherInstallResult,
+    LauncherModpack, LauncherModpackToml, LauncherSettings, MAX_CONSOLE_SNAPSHOT_BYTES,
+    NewModpackToml, PATCHWORK_AUTH_EVENT, PATCHWORK_CONSOLE_EVENT, PatchworkAuthEvent,
+    PatchworkConsoleChunk, PatchworkConsoleEvent, PatchworkTaskState, PatchworkTaskStatus,
+    RegistryDownloadEvent, RegistryDownloadStatus, RegistryInstallReport, SETTINGS_FILE,
+    SETTINGS_POINTER_FILE, SelectedIconFile, SettingsPointer,
 };
 use paths::{
     default_patchwork_data_dir, display_path, distinct_dependency_count, expand_env_vars,
@@ -82,6 +82,62 @@ fn load_launcher_settings(state: State<AppState>) -> Result<LauncherSettings, St
 }
 
 #[tauri::command]
+async fn launcher_cache_usage(state: State<'_, AppState>) -> Result<LauncherCacheUsage, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_string())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || calculate_cache_usage(&settings))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn clear_launcher_cache(
+    state: State<'_, AppState>,
+    cache: String,
+) -> Result<LauncherCacheUsage, String> {
+    if state
+        .tasks
+        .lock()
+        .map_err(|_| "Patchwork task lock is poisoned".to_string())?
+        .values()
+        .any(|task| task.running || task.child.is_some())
+    {
+        return Err("Stop the active Patchwork task before clearing caches.".to_owned());
+    }
+
+    let settings = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_string())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        match cache.as_str() {
+            "cargo" => {
+                for path in cargo_cache_paths()? {
+                    remove_cache_path(&path, false)?;
+                }
+            }
+            "target" => {
+                remove_cache_path(Path::new(&settings.cargo_target_dir), true)?;
+            }
+            "build" => {
+                remove_cache_path(Path::new(&settings.build_cache), true)?;
+            }
+            "bin" => {
+                remove_cache_path(Path::new(&settings.bin_cache), true)?;
+            }
+            _ => return Err(format!("Unknown launcher cache '{cache}'")),
+        }
+        calculate_cache_usage(&settings)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn update_launcher_path(
     state: State<AppState>,
     field: String,
@@ -102,6 +158,7 @@ fn update_launcher_path(
         "modpacks_cache" => settings.modpacks_cache = value,
         "profiles_dir" => settings.profiles_dir = value,
         "build_cache" => settings.build_cache = value,
+        "bin_cache" => settings.bin_cache = value,
         "settings_file" => {
             let new_settings_path = PathBuf::from(&value);
             settings.settings_file = display_path(&new_settings_path);
@@ -946,13 +1003,13 @@ fn stop_patchwork_action(
         .map_err(|_| "patchwork task lock is poisoned".to_string())?;
     let Some(task) = tasks.get_mut(&profile_id) else {
         return Err(format!(
-            "There is no running cargo process for '{profile_id}'."
+            "There is no running Patchwork process for '{profile_id}'."
         ));
     };
     if let Some(child) = task.child.as_mut() {
         child
             .kill()
-            .map_err(|error| format!("Failed to stop running cargo process: {error}"))?;
+            .map_err(|error| format!("Failed to stop running Patchwork process: {error}"))?;
         task.stop_requested = true;
         append_line_to_task(task, "[run] Stop requested.");
         let chunk = encode_console_line("[run] Stop requested.");
@@ -972,7 +1029,7 @@ fn stop_patchwork_action(
         Ok(true)
     } else {
         Err(format!(
-            "There is no running cargo process for '{profile_id}'."
+            "There is no running Patchwork process for '{profile_id}'."
         ))
     }
 }
@@ -1123,6 +1180,8 @@ pub fn run() {
             registry::registry_rescan_mod,
             registry::registry_start_rescan,
             load_launcher_settings,
+            launcher_cache_usage,
+            clear_launcher_cache,
             update_launcher_path,
             update_launcher_theme,
             update_launcher_backend,
@@ -1180,6 +1239,96 @@ fn ensure_settings_dirs(settings: &LauncherSettings) -> Result<(), io::Error> {
     }
     if let Some(parent) = Path::new(&settings.settings_file).parent() {
         fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn calculate_cache_usage(settings: &LauncherSettings) -> Result<LauncherCacheUsage, String> {
+    let cargo_cache_bytes = cargo_cache_paths()?.iter().try_fold(0_u64, |total, path| {
+        directory_size(path).map(|size| total.saturating_add(size))
+    })?;
+    Ok(LauncherCacheUsage {
+        cargo_cache_bytes,
+        target_cache_bytes: directory_size(Path::new(&settings.cargo_target_dir))?,
+        build_cache_bytes: directory_size(Path::new(&settings.build_cache))?,
+        bin_cache_bytes: directory_size(Path::new(&settings.bin_cache))?,
+    })
+}
+
+fn cargo_cache_paths() -> Result<[PathBuf; 2], String> {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .ok_or_else(|| "Cannot determine Cargo home directory".to_owned())?;
+    Ok([cargo_home.join("registry"), cargo_home.join("git")])
+}
+
+fn directory_size(path: &Path) -> Result<u64, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(format!("Failed to inspect '{}': {error}", path.display())),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    fs::read_dir(path)
+        .map_err(|error| format!("Failed to read '{}': {error}", path.display()))?
+        .try_fold(0_u64, |total, entry| {
+            let entry =
+                entry.map_err(|error| format!("Failed to read '{}': {error}", path.display()))?;
+            directory_size(&entry.path()).map(|size| total.saturating_add(size))
+        })
+}
+
+fn remove_cache_path(path: &Path, recreate: bool) -> Result<(), String> {
+    validate_clearable_path(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "Refusing to clear symlinked cache path '{}'",
+                path.display()
+            ));
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
+            .map_err(|error| format!("Failed to clear '{}': {error}", path.display()))?,
+        Ok(_) => fs::remove_file(path)
+            .map_err(|error| format!("Failed to clear '{}': {error}", path.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Failed to inspect '{}': {error}", path.display())),
+    }
+    if recreate {
+        fs::create_dir_all(path)
+            .map_err(|error| format!("Failed to recreate '{}': {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn validate_clearable_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!(
+            "Refusing to clear unsafe cache path '{}'",
+            path.display()
+        ));
+    }
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if resolved.parent().is_none() {
+        return Err("Refusing to clear a filesystem root".to_owned());
+    }
+    if env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| home.canonicalize().ok())
+        .as_deref()
+        .is_some_and(|home| home == resolved)
+    {
+        return Err("Refusing to clear the home directory".to_owned());
     }
     Ok(())
 }
@@ -1270,6 +1419,9 @@ fn read_modpack_file(
     )
     .map(|page| page.distinct_dependency_count)
     .unwrap_or_else(|_| distinct_dependency_count(&parsed.modpacks, &parsed.mods));
+    let downloads = profile_downloads(settings, &id)
+        .map(format_download_count)
+        .unwrap_or_else(|| "-".to_owned());
 
     Ok(LauncherModpack {
         id: id.clone(),
@@ -1280,7 +1432,7 @@ fn read_modpack_file(
         version: parsed.version.unwrap_or_else(|| "1.21.x".to_string()),
         mods: parsed.mods.len(),
         dependencies: dependency_count,
-        downloads: "-".to_owned(),
+        downloads,
         accent: parsed
             .color
             .filter(|color| is_valid_hex_color(color))
@@ -1289,6 +1441,33 @@ fn read_modpack_file(
         icon_version,
         updates_available: 0,
     })
+}
+
+fn profile_downloads(settings: &LauncherSettings, id: &str) -> Option<i64> {
+    let origin = registry::load_profile_origin(settings, id)?;
+    if origin.source == patchwork_registry_types::RegistryBrowseSource::Local {
+        return None;
+    }
+    registry::fetch_project_details(
+        &settings.backend,
+        RegistryProjectRef {
+            project_kind: RegistryProjectKind::Modpack,
+            project_id: id.to_owned(),
+        },
+    )
+    .ok()
+    .and_then(|details| details.downloads)
+    .or(Some(origin.downloads))
+}
+
+fn format_download_count(downloads: i64) -> String {
+    if downloads >= 1_000_000 {
+        format!("{:.1}M", downloads as f64 / 1_000_000.0)
+    } else if downloads >= 1_000 {
+        format!("{:.1}K", downloads as f64 / 1_000.0)
+    } else {
+        downloads.to_string()
+    }
 }
 
 fn decorate_dependency_page(
@@ -1387,10 +1566,26 @@ fn dependency_page_source(
     let stored_origin = matches!(page.kind, patchwork::DependencyPageKind::Profile)
         .then(|| registry::load_profile_origin(settings, &page.id))
         .flatten();
-    if stored_origin.as_ref().is_some_and(|origin| {
-        origin.source == patchwork_registry_types::RegistryBrowseSource::Local
-    }) {
-        return ("local-registry".to_owned(), None);
+    if matches!(page.kind, patchwork::DependencyPageKind::Profile) {
+        match stored_origin {
+            Some(origin)
+                if origin.source == patchwork_registry_types::RegistryBrowseSource::Local =>
+            {
+                return ("local-registry".to_owned(), None);
+            }
+            Some(_) => {
+                let details = registry::fetch_project_details(
+                    &settings.backend,
+                    RegistryProjectRef {
+                        project_kind,
+                        project_id: page.id.clone(),
+                    },
+                )
+                .ok();
+                return ("remote-registry".to_owned(), details);
+            }
+            None => return ("profile".to_owned(), None),
+        }
     }
 
     let is_local = settings.local_folders.iter().any(|folder| {
@@ -1414,8 +1609,6 @@ fn dependency_page_source(
     .ok();
     if details.is_some() {
         ("remote-registry".to_owned(), details)
-    } else if matches!(page.kind, patchwork::DependencyPageKind::Profile) {
-        ("profile".to_owned(), None)
     } else {
         ("remote-registry".to_owned(), None)
     }
@@ -1517,41 +1710,47 @@ fn run_patchwork_task(
 
     if matches!(action.as_str(), "compose-build" | "build") {
         let project_dir = Path::new(&settings.build_cache).join(&profile_id);
-        run_cargo_process(
+        if run_cargo_build(
             &app,
-            tasks,
+            tasks.clone(),
             &profile_id,
             &action,
-            "build",
             &project_dir,
             &build_mode,
-            &settings.cargo_target_dir,
-        );
+            &settings,
+        ) {
+            match archive_built_executable(&settings, &profile_id, &build_mode) {
+                Ok(path) => emit_console_line(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[build] Executable stored at '{}'.", path.display()),
+                ),
+                Err(error) => emit_console_line_with_error(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[build] Failed to store executable: {error}"),
+                    Some(error),
+                ),
+            }
+        }
     } else if action == "run" {
-        let project_dir = Path::new(&settings.build_cache).join(&profile_id);
-        run_cargo_process(
-            &app,
-            tasks,
-            &profile_id,
-            &action,
-            "run",
-            &project_dir,
-            &build_mode,
-            &settings.cargo_target_dir,
-        );
+        run_profile_executable(&app, tasks, &profile_id, &action, &settings, &build_mode);
     }
 }
 
-fn run_cargo_process(
+fn run_cargo_build(
     app: &AppHandle,
     tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
     profile_id: &str,
     action: &str,
-    cargo_action: &str,
     project_dir: &Path,
     build_mode: &str,
-    cargo_target_dir: &str,
-) {
+    settings: &LauncherSettings,
+) -> bool {
     if !project_dir.join("Cargo.toml").is_file() {
         emit_console_line(
             app,
@@ -1559,15 +1758,34 @@ fn run_cargo_process(
             profile_id,
             action,
             &format!(
-                "[{cargo_action}] Failed: composed project not found at '{}'. Run Compose first.",
+                "[build] Failed: composed project not found at '{}'. Run Compose first.",
                 project_dir.display()
             ),
         );
-        return;
+        return false;
+    }
+
+    let cargo_executable = cargo_executable_path(settings, profile_id, build_mode);
+    if fs::symlink_metadata(&cargo_executable)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && !cargo_executable.is_file()
+        && let Err(error) = fs::remove_file(&cargo_executable)
+    {
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            &format!(
+                "[build] Failed to remove broken executable symlink '{}': {error}",
+                cargo_executable.display()
+            ),
+        );
+        return false;
     }
 
     let mut command = CommandBuilder::new("cargo");
-    command.arg(cargo_action);
+    command.arg("build");
     command.cwd(project_dir.as_os_str());
     if build_mode == "release" {
         command.arg("--release");
@@ -1575,8 +1793,8 @@ fn run_cargo_process(
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("CARGO_TERM_COLOR", "always");
-    if !cargo_target_dir.trim().is_empty() {
-        command.env("CARGO_TARGET_DIR", cargo_target_dir);
+    if !settings.cargo_target_dir.trim().is_empty() {
+        command.env("CARGO_TARGET_DIR", &settings.cargo_target_dir);
     }
 
     emit_console_line(
@@ -1585,7 +1803,7 @@ fn run_cargo_process(
         profile_id,
         action,
         &format!(
-            "[{cargo_action}] Command: cargo {cargo_action}{}",
+            "[build] Command: cargo build{}",
             if build_mode == "release" {
                 " --release"
             } else {
@@ -1593,16 +1811,75 @@ fn run_cargo_process(
             }
         ),
     );
-    if !cargo_target_dir.trim().is_empty() {
+    if !settings.cargo_target_dir.trim().is_empty() {
         emit_console_line(
             app,
             &tasks,
             profile_id,
             action,
-            &format!("[{cargo_action}] CARGO_TARGET_DIR={cargo_target_dir}"),
+            &format!("[build] CARGO_TARGET_DIR={}", settings.cargo_target_dir),
         );
     }
 
+    run_pty_process(app, tasks, profile_id, action, "build", command)
+}
+
+fn run_profile_executable(
+    app: &AppHandle,
+    tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
+    profile_id: &str,
+    action: &str,
+    settings: &LauncherSettings,
+    build_mode: &str,
+) -> bool {
+    let executable = executable_path(settings, profile_id, build_mode);
+    if !executable.is_file() {
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            &format!(
+                "[run] Failed: executable not found at '{}'. Run Build first.",
+                executable.display()
+            ),
+        );
+        return false;
+    }
+
+    let mut command = CommandBuilder::new(executable.as_os_str());
+    let project_dir = Path::new(&settings.build_cache).join(profile_id);
+    let working_dir = if project_dir.is_dir() {
+        project_dir
+    } else {
+        executable
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+    command.cwd(working_dir.as_os_str());
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("BEVY_ASSET_ROOT", working_dir.as_os_str());
+    command.env("BACKEND_ADDR", &settings.backend);
+    emit_console_line(
+        app,
+        &tasks,
+        profile_id,
+        action,
+        &format!("[run] Command: {}", executable.display()),
+    );
+    run_pty_process(app, tasks, profile_id, action, "run", command)
+}
+
+fn run_pty_process(
+    app: &AppHandle,
+    tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
+    profile_id: &str,
+    action: &str,
+    process_label: &str,
+    command: CommandBuilder,
+) -> bool {
     let initial_size = tasks
         .lock()
         .ok()
@@ -1618,9 +1895,9 @@ fn run_cargo_process(
                 &tasks,
                 profile_id,
                 action,
-                &format!("[{cargo_action}] Failed to open PTY: {error}"),
+                &format!("[{process_label}] Failed to open PTY: {error}"),
             );
-            return;
+            return false;
         }
     };
 
@@ -1632,9 +1909,9 @@ fn run_cargo_process(
                 &tasks,
                 profile_id,
                 action,
-                &format!("[{cargo_action}] Failed to open PTY reader: {error}"),
+                &format!("[{process_label}] Failed to open PTY reader: {error}"),
             );
-            return;
+            return false;
         }
     };
 
@@ -1646,9 +1923,9 @@ fn run_cargo_process(
                 &tasks,
                 profile_id,
                 action,
-                &format!("[{cargo_action}] Failed to open PTY writer: {error}"),
+                &format!("[{process_label}] Failed to open PTY writer: {error}"),
             );
-            return;
+            return false;
         }
     };
 
@@ -1660,9 +1937,9 @@ fn run_cargo_process(
                 &tasks,
                 profile_id,
                 action,
-                &format!("[{cargo_action}] Failed to run cargo: {error}"),
+                &format!("[{process_label}] Failed to start process: {error}"),
             );
-            return;
+            return false;
         }
     };
     drop(pair.slave);
@@ -1682,6 +1959,7 @@ fn run_cargo_process(
         thread::spawn(move || stream_pty_output(app, tasks, profile_id, action, reader))
     };
 
+    let mut succeeded = false;
     loop {
         let status = {
             let mut tasks = match tasks.lock() {
@@ -1692,7 +1970,7 @@ fn run_cargo_process(
                         &tasks,
                         profile_id,
                         action,
-                        "[cargo] Failed: task lock is poisoned.",
+                        &format!("[{process_label}] Failed: task lock is poisoned."),
                     );
                     break;
                 }
@@ -1710,7 +1988,7 @@ fn run_cargo_process(
                     Ok(None) => None,
                     Err(error) => {
                         let line =
-                            format!("[{cargo_action}] Failed while waiting for cargo: {error}");
+                            format!("[{process_label}] Failed while waiting for process: {error}");
                         append_line_to_task(task, &line);
                         let chunk = encode_console_line(&line);
                         emit_console(
@@ -1733,7 +2011,7 @@ fn run_cargo_process(
                     }
                 },
                 None => {
-                    let line = format!("[{cargo_action}] Stopped.");
+                    let line = format!("[{process_label}] Stopped.");
                     append_line_to_task(task, &line);
                     let chunk = encode_console_line(&line);
                     emit_console(
@@ -1761,7 +2039,7 @@ fn run_cargo_process(
                     &tasks,
                     profile_id,
                     action,
-                    &format!("[{cargo_action}] Stopped."),
+                    &format!("[{process_label}] Stopped."),
                 );
             } else if status.success() {
                 emit_console_line(
@@ -1769,29 +2047,30 @@ fn run_cargo_process(
                     &tasks,
                     profile_id,
                     action,
-                    &format!("[{cargo_action}] Status: {status}"),
+                    &format!("[{process_label}] Status: {status}"),
                 );
                 emit_console_line(
                     app,
                     &tasks,
                     profile_id,
                     action,
-                    &format!("[{cargo_action}] Done."),
+                    &format!("[{process_label}] Done."),
                 );
+                succeeded = true;
             } else {
                 emit_console_line(
                     app,
                     &tasks,
                     profile_id,
                     action,
-                    &format!("[{cargo_action}] Status: {status}"),
+                    &format!("[{process_label}] Status: {status}"),
                 );
                 emit_console_line(
                     app,
                     &tasks,
                     profile_id,
                     action,
-                    &format!("[{cargo_action}] Failed."),
+                    &format!("[{process_label}] Failed."),
                 );
             }
             break;
@@ -1801,6 +2080,7 @@ fn run_cargo_process(
     }
 
     let _ = reader.join();
+    succeeded
 }
 
 fn stream_pty_output<R>(
@@ -1979,6 +2259,29 @@ fn executable_path(settings: &LauncherSettings, profile_id: &str, build_mode: &s
     let project_dir = Path::new(&settings.build_cache).join(profile_id);
     let package_name =
         composed_package_name(&project_dir).unwrap_or_else(|| profile_id.to_string());
+    let profile_dir = if build_mode == "debug" {
+        "debug"
+    } else {
+        "release"
+    };
+    let mut executable = Path::new(&settings.bin_cache)
+        .join(profile_id)
+        .join(profile_dir)
+        .join(package_name);
+    if cfg!(windows) {
+        executable.set_extension("exe");
+    }
+    executable
+}
+
+fn cargo_executable_path(
+    settings: &LauncherSettings,
+    profile_id: &str,
+    build_mode: &str,
+) -> PathBuf {
+    let project_dir = Path::new(&settings.build_cache).join(profile_id);
+    let package_name =
+        composed_package_name(&project_dir).unwrap_or_else(|| profile_id.to_string());
     let target_root = if settings.cargo_target_dir.trim().is_empty() {
         project_dir.join("target")
     } else {
@@ -1994,6 +2297,106 @@ fn executable_path(settings: &LauncherSettings, profile_id: &str, build_mode: &s
         executable.set_extension("exe");
     }
     executable
+}
+
+fn archive_built_executable(
+    settings: &LauncherSettings,
+    profile_id: &str,
+    build_mode: &str,
+) -> Result<PathBuf, String> {
+    let source = cargo_executable_path(settings, profile_id, build_mode);
+    let destination = executable_path(settings, profile_id, build_mode);
+
+    if fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        if source.canonicalize().ok() == destination.canonicalize().ok() && destination.is_file() {
+            return Ok(destination);
+        }
+        fs::remove_file(&source).map_err(|error| {
+            format!(
+                "Failed to remove stale executable symlink '{}': {error}",
+                source.display()
+            )
+        })?;
+    }
+    if !source.is_file() {
+        return Err(format!(
+            "Cargo did not produce the expected executable at '{}'",
+            source.display()
+        ));
+    }
+
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| "Binary cache destination has no parent directory".to_owned())?;
+    fs::create_dir_all(destination_parent).map_err(|error| {
+        format!(
+            "Failed to create binary cache '{}': {error}",
+            destination_parent.display()
+        )
+    })?;
+    let file_name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("executable");
+    let temporary = destination_parent.join(format!(".{file_name}.patchwork-new"));
+    if fs::symlink_metadata(&temporary).is_ok() {
+        fs::remove_file(&temporary).map_err(|error| {
+            format!(
+                "Failed to remove temporary executable '{}': {error}",
+                temporary.display()
+            )
+        })?;
+    }
+    fs::copy(&source, &temporary).map_err(|error| {
+        format!(
+            "Failed to copy executable '{}' to binary cache: {error}",
+            source.display()
+        )
+    })?;
+    if fs::symlink_metadata(&destination).is_ok() {
+        fs::remove_file(&destination).map_err(|error| {
+            format!(
+                "Failed to replace cached executable '{}': {error}",
+                destination.display()
+            )
+        })?;
+    }
+    fs::rename(&temporary, &destination).map_err(|error| {
+        format!(
+            "Failed to publish cached executable '{}': {error}",
+            destination.display()
+        )
+    })?;
+    fs::remove_file(&source).map_err(|error| {
+        format!(
+            "Failed to remove Cargo executable '{}': {error}",
+            source.display()
+        )
+    })?;
+    create_executable_symlink(&destination, &source)?;
+    Ok(destination)
+}
+
+#[cfg(unix)]
+fn create_executable_symlink(destination: &Path, link: &Path) -> Result<(), String> {
+    std::os::unix::fs::symlink(destination, link).map_err(|error| {
+        format!(
+            "Failed to create executable symlink '{}' -> '{}': {error}",
+            link.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn create_executable_symlink(destination: &Path, link: &Path) -> Result<(), String> {
+    std::os::windows::fs::symlink_file(destination, link).map_err(|error| {
+        format!(
+            "Failed to create executable symlink '{}' -> '{}': {error}",
+            link.display(),
+            destination.display()
+        )
+    })
 }
 
 fn composed_package_name(project_dir: &Path) -> Option<String> {
@@ -2020,5 +2423,46 @@ fn build_mode_label(mode: &str) -> &'static str {
     match mode {
         "debug" => "Debug mode",
         _ => "Release mode",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn archives_built_executable_and_leaves_target_symlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let mut settings = LauncherSettings::default_for(root);
+        settings.cargo_target_dir = display_path(&root.join("target"));
+        settings.build_cache = display_path(&root.join("cache/build"));
+        settings.bin_cache = display_path(&root.join("cache/bin"));
+
+        let project_dir = Path::new(&settings.build_cache).join("example-profile");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("Cargo.toml"),
+            "[package]\nname = \"example-game\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let cargo_executable = cargo_executable_path(&settings, "example-profile", "release");
+        fs::create_dir_all(cargo_executable.parent().unwrap()).unwrap();
+        fs::write(&cargo_executable, b"executable").unwrap();
+
+        let cached = archive_built_executable(&settings, "example-profile", "release").unwrap();
+
+        assert_eq!(fs::read(&cached).unwrap(), b"executable");
+        assert!(
+            fs::symlink_metadata(&cargo_executable)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            cargo_executable.canonicalize().unwrap(),
+            cached.canonicalize().unwrap()
+        );
     }
 }

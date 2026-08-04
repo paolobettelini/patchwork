@@ -9,8 +9,7 @@ use crate::{
         refresh_auth_profile, refresh_profiles, registry_add_to_profile, registry_browse,
         registry_download_modpack_as_profile, registry_download_status, registry_get_scan,
         registry_project_details, registry_publish_scan, registry_scan_progress,
-        registry_start_rescan, registry_start_scan, start_github_connect, start_oauth_login,
-        update_auth_nickname,
+        registry_start_scan, start_github_connect, start_oauth_login, update_auth_nickname,
     },
 };
 use gloo_timers::future::TimeoutFuture;
@@ -44,7 +43,7 @@ pub(crate) fn App() -> impl IntoView {
     let (registry_pending, set_registry_pending) = signal(false);
     let (registry_error, set_registry_error) = signal(None::<String>);
     let (registry_notice, set_registry_notice) = signal(None::<String>);
-    let (registry_rescan_pending, set_registry_rescan_pending) = signal(None::<String>);
+    let (upload_prefill, set_upload_prefill) = signal(None::<RegistryScanRequest>);
     let (browse_results, set_browse_results) = signal(Vec::<RegistryBrowseProject>::new());
     let (browse_pending, set_browse_pending) = signal(false);
     let (browse_action_pending, set_browse_action_pending) = signal(None::<String>);
@@ -268,31 +267,22 @@ pub(crate) fn App() -> impl IntoView {
             set_registry_pending.set(false);
         });
     });
-    let profile_rescan = Callback::new(move |project: RegistryProjectRef| {
+    let profile_rescan = Callback::new(move |project: UiPublishedProject| {
         set_registry_error.set(None);
         set_registry_progress.set(None);
         set_registry_scan.set(None);
-        set_registry_rescan_pending.set(Some(project.project_id.clone()));
-        set_registry_pending.set(true);
+        set_registry_notice.set(None);
+        set_registry_pending.set(false);
         set_active_tab.set(AppTab::Upload);
-        leptos::task::spawn_local(async move {
-            let result = async {
-                let started = registry_start_rescan(&project)
-                    .await
-                    .map_err(js_error_message)?;
-                poll_registry_scan(&started.job_id, set_registry_progress).await
+        match project.rescan_request() {
+            Some(request) => {
+                set_upload_prefill.set(None);
+                set_upload_prefill.set(Some(request));
             }
-            .await;
-            match result {
-                Ok(scan) => {
-                    set_registry_scan.set(Some(scan));
-                    set_registry_notice.set(None);
-                }
-                Err(error) => set_registry_error.set(Some(error)),
-            }
-            set_registry_rescan_pending.set(None);
-            set_registry_pending.set(false);
-        });
+            None => set_registry_error.set(Some(
+                "This project does not contain repository coordinates for a rescan.".to_owned(),
+            )),
+        }
     });
 
     let _ = listen_patchwork_auth(move |event| {
@@ -408,6 +398,7 @@ pub(crate) fn App() -> impl IntoView {
                         pending=Signal::from(registry_pending)
                         error=Signal::from(registry_error)
                         notice=Signal::from(registry_notice)
+                        prefill=Signal::from(upload_prefill)
                         on_sign_in=upload_sign_in
                         on_connect_github=upload_connect_github
                         on_scan=upload_scan
@@ -434,7 +425,6 @@ pub(crate) fn App() -> impl IntoView {
                         set_github_pending
                         on_open_project=open_registry_project
                         on_rescan=profile_rescan
-                        rescan_pending=Signal::from(registry_rescan_pending)
                         registry_error=Signal::from(registry_error)
                     />
                 </section>
@@ -618,8 +608,7 @@ fn AppProfilePage(
     github_pending: ReadSignal<bool>,
     set_github_pending: WriteSignal<bool>,
     on_open_project: Callback<RegistryProjectRef>,
-    on_rescan: Callback<RegistryProjectRef>,
-    rescan_pending: Signal<Option<String>>,
+    on_rescan: Callback<UiPublishedProject>,
     registry_error: Signal<Option<String>>,
 ) -> impl IntoView {
     let (editing_nickname, set_editing_nickname) = signal(false);
@@ -649,7 +638,6 @@ fn AppProfilePage(
                             modpacks=ui_projects(&profile.modpacks)
                             on_open_project
                             on_rescan
-                            rescan_pending
                         >
                             <AppGithubConnection
                                 github=profile.github.clone()

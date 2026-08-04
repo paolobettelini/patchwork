@@ -1,9 +1,10 @@
 use crate::{
     icons::{FolderIcon, TrashIcon},
-    model::{LauncherModpack, LauncherSettings, SettingsTab},
+    model::{LauncherCacheUsage, LauncherModpack, LauncherSettings, SettingsTab},
     tauri_bridge::{
-        list_modpacks, select_folder, select_settings_file, update_launcher_backend,
-        update_launcher_local_folders, update_launcher_path, update_launcher_theme,
+        clear_launcher_cache, launcher_cache_usage, list_modpacks, select_folder,
+        select_settings_file, update_launcher_backend, update_launcher_local_folders,
+        update_launcher_path, update_launcher_theme,
     },
 };
 use leptos::prelude::*;
@@ -44,6 +45,11 @@ pub(crate) fn SettingsPage(
     let (local_entries, set_local_entries) = signal(vec![DynamicEntry::empty(0)]);
     let (_local_next_id, set_local_next_id) = signal(1_u32);
     let (local_entries_initialized, set_local_entries_initialized) = signal(false);
+    let (cache_usage, set_cache_usage) = signal(LauncherCacheUsage::default());
+    let (cache_pending, set_cache_pending) = signal(None::<String>);
+    let (cache_error, set_cache_error) = signal(None::<String>);
+    let (cache_notice, set_cache_notice) = signal(None::<String>);
+    let (measured_cache_paths, set_measured_cache_paths) = signal(None::<(String, String, String)>);
 
     Effect::new(move |_| {
         if local_entries_initialized.get() {
@@ -66,6 +72,30 @@ pub(crate) fn SettingsPage(
         set_local_entries.set(entries);
         set_local_next_id.set(next_id + 1);
         set_local_entries_initialized.set(true);
+    });
+
+    Effect::new(move |_| {
+        let Some(paths) = settings.with(|settings| {
+            settings.as_ref().map(|settings| {
+                (
+                    settings.cargo_target_dir.clone(),
+                    settings.build_cache.clone(),
+                    settings.bin_cache.clone(),
+                )
+            })
+        }) else {
+            return;
+        };
+        if measured_cache_paths.get_untracked().as_ref() == Some(&paths) {
+            return;
+        }
+        set_measured_cache_paths.set(Some(paths));
+        leptos::task::spawn_local(async move {
+            match launcher_cache_usage().await {
+                Ok(usage) => set_cache_usage.set(usage),
+                Err(error) => set_cache_error.set(Some(js_error_to_string(error))),
+            }
+        });
     });
 
     view! {
@@ -212,21 +242,31 @@ pub(crate) fn SettingsPage(
                             set_selected_modpack
                         />
                         <PathInput
-                            label="Profiles"
-                            description="User modpack profiles rendered on the launcher home page."
-                            field="profiles_dir"
-                            picker=PathPicker::Folder
-                            value=move || settings.with(|settings| settings.as_ref().map(|settings| settings.profiles_dir.clone()).unwrap_or_default())
-                            set_settings
-                            set_modpacks
-                            set_selected_modpack
-                        />
-                        <PathInput
                             label="Build cache"
                             description="Composed modpack output directory used before building/running."
                             field="build_cache"
                             picker=PathPicker::Folder
                             value=move || settings.with(|settings| settings.as_ref().map(|settings| settings.build_cache.clone()).unwrap_or_default())
+                            set_settings
+                            set_modpacks
+                            set_selected_modpack
+                        />
+                        <PathInput
+                            label="Binary cache"
+                            description="Built profile executables stored outside Cargo target."
+                            field="bin_cache"
+                            picker=PathPicker::Folder
+                            value=move || settings.with(|settings| settings.as_ref().map(|settings| settings.bin_cache.clone()).unwrap_or_default())
+                            set_settings
+                            set_modpacks
+                            set_selected_modpack
+                        />
+                        <PathInput
+                            label="Profiles"
+                            description="User modpack profiles rendered on the launcher home page."
+                            field="profiles_dir"
+                            picker=PathPicker::Folder
+                            value=move || settings.with(|settings| settings.as_ref().map(|settings| settings.profiles_dir.clone()).unwrap_or_default())
                             set_settings
                             set_modpacks
                             set_selected_modpack
@@ -244,12 +284,116 @@ pub(crate) fn SettingsPage(
                     </div>
 
                     <div class="cache-actions">
-                        <button type="button" class="secondary-action">"Clear cargo cache"</button>
-                        <button type="button" class="secondary-action">"Clear target cache"</button>
+                        <CacheAction
+                            label="Clear cargo cache"
+                            cache="cargo"
+                            bytes=Signal::derive(move || cache_usage.get().cargo_cache_bytes)
+                            cache_pending
+                            set_cache_pending
+                            set_cache_usage
+                            set_cache_error
+                            set_cache_notice
+                        />
+                        <CacheAction
+                            label="Clear target cache"
+                            cache="target"
+                            bytes=Signal::derive(move || cache_usage.get().target_cache_bytes)
+                            cache_pending
+                            set_cache_pending
+                            set_cache_usage
+                            set_cache_error
+                            set_cache_notice
+                        />
+                        <CacheAction
+                            label="Clear build cache"
+                            cache="build"
+                            bytes=Signal::derive(move || cache_usage.get().build_cache_bytes)
+                            cache_pending
+                            set_cache_pending
+                            set_cache_usage
+                            set_cache_error
+                            set_cache_notice
+                        />
+                        <CacheAction
+                            label="Clear binary cache"
+                            cache="bin"
+                            bytes=Signal::derive(move || cache_usage.get().bin_cache_bytes)
+                            cache_pending
+                            set_cache_pending
+                            set_cache_usage
+                            set_cache_error
+                            set_cache_notice
+                        />
                     </div>
+                    {move || cache_error.get().map(|error| view! {
+                        <p class="cache-feedback error" role="alert">{error}</p>
+                    })}
+                    {move || cache_notice.get().map(|notice| view! {
+                        <p class="cache-feedback success">{notice}</p>
+                    })}
                 </div>
             </section>
         </div>
+    }
+}
+
+#[component]
+fn CacheAction(
+    label: &'static str,
+    cache: &'static str,
+    bytes: Signal<u64>,
+    cache_pending: ReadSignal<Option<String>>,
+    set_cache_pending: WriteSignal<Option<String>>,
+    set_cache_usage: WriteSignal<LauncherCacheUsage>,
+    set_cache_error: WriteSignal<Option<String>>,
+    set_cache_notice: WriteSignal<Option<String>>,
+) -> impl IntoView {
+    let clear = move |_| {
+        if cache_pending.get_untracked().is_some() {
+            return;
+        }
+        let confirmed = web_sys::window()
+            .and_then(|window| {
+                window
+                    .confirm_with_message(&format!("{label}? This cannot be undone."))
+                    .ok()
+            })
+            .unwrap_or(false);
+        if !confirmed {
+            return;
+        }
+
+        set_cache_error.set(None);
+        set_cache_notice.set(None);
+        set_cache_pending.set(Some(cache.to_owned()));
+        leptos::task::spawn_local(async move {
+            match clear_launcher_cache(cache).await {
+                Ok(usage) => {
+                    set_cache_usage.set(usage);
+                    set_cache_notice.set(Some(format!("{label} completed.")));
+                }
+                Err(error) => set_cache_error.set(Some(js_error_to_string(error))),
+            }
+            set_cache_pending.set(None);
+        });
+    };
+
+    view! {
+        <button
+            type="button"
+            class="danger-action cache-clear-action"
+            disabled=move || cache_pending.get().is_some()
+            on:click=clear
+        >
+            <TrashIcon />
+            <span>{move || {
+                if cache_pending.get().as_deref() == Some(cache) {
+                    format!("Clearing... ({})", format_bytes(bytes.get()))
+                } else {
+                    format!("{label} ({})", format_bytes(bytes.get()))
+                }
+            }}</span>
+        </button>
     }
 }
 
@@ -553,6 +697,22 @@ fn theme_card_class(is_active: bool) -> &'static str {
         "theme-card selected"
     } else {
         "theme-card"
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1_000.0;
+    const MB: f64 = 1_000_000.0;
+    const GB: f64 = 1_000_000_000.0;
+    let bytes = bytes as f64;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes / MB)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes / KB)
+    } else {
+        format!("{} B", bytes as u64)
     }
 }
 

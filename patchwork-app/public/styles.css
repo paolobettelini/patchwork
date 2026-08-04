@@ -2774,6 +2774,35 @@ input:focus {
   padding-top: 4px;
 }
 
+.cache-clear-action {
+  min-width: 0;
+}
+
+.cache-clear-action .icon {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+}
+
+.cache-clear-action:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.cache-feedback {
+  margin: -4px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cache-feedback.error {
+  color: var(--danger);
+}
+
+.cache-feedback.success {
+  color: var(--success);
+}
+
 .secondary-action {
   padding: 0 14px;
   border: 1px dashed var(--thread);

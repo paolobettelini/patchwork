@@ -60,7 +60,7 @@ pub(crate) fn WebApp() -> impl IntoView {
     let (registry_pending, set_registry_pending) = signal(false);
     let (registry_error, set_registry_error) = signal(None::<String>);
     let (registry_notice, set_registry_notice) = signal(None::<String>);
-    let (registry_rescan_pending, set_registry_rescan_pending) = signal(None::<String>);
+    let (upload_prefill, _) = signal(upload_prefill_from_query());
     let (browse_results, set_browse_results) = signal(Vec::<RegistryBrowseProject>::new());
     let (browse_pending, set_browse_pending) = signal(false);
     let (browse_error, set_browse_error) = signal(None::<String>);
@@ -160,17 +160,16 @@ pub(crate) fn WebApp() -> impl IntoView {
             set_registry_pending.set(false);
         });
     });
-    let profile_rescan = Callback::new(move |project: RegistryProjectRef| {
+    let profile_rescan = Callback::new(move |project: PublishedProject| {
         set_registry_error.set(None);
         set_registry_progress.set(None);
-        set_registry_rescan_pending.set(Some(project.project_id.clone()));
-        leptos::task::spawn_local(async move {
-            match start_registry_rescan(&project).await {
-                Ok(started) => navigate_to(&format!("/upload?job={}", started.job_id)),
-                Err(message) => set_registry_error.set(Some(message)),
-            }
-            set_registry_rescan_pending.set(None);
-        });
+        set_registry_scan.set(None);
+        match project.rescan_request() {
+            Some(request) => navigate_to(&upload_path(&request)),
+            None => set_registry_error.set(Some(
+                "This project does not contain repository coordinates for a rescan.".to_owned(),
+            )),
+        }
     });
 
     leptos::task::spawn_local(async move {
@@ -253,6 +252,7 @@ pub(crate) fn WebApp() -> impl IntoView {
                             pending=Signal::from(registry_pending)
                             error=Signal::from(registry_error)
                             notice=Signal::from(registry_notice)
+                            prefill=Signal::from(upload_prefill)
                             on_sign_in=upload_sign_in
                             on_connect_github=upload_connect_github
                             on_scan=upload_scan
@@ -267,7 +267,6 @@ pub(crate) fn WebApp() -> impl IntoView {
                             set_show_auth
                             on_open_project=open_project
                             on_rescan=profile_rescan
-                            rescan_pending=Signal::from(registry_rescan_pending)
                             registry_error=Signal::from(registry_error)
                         />
                     }.into_any(),
@@ -658,8 +657,7 @@ fn WebProfilePage(
     set_profile: WriteSignal<Option<ProfileDto>>,
     set_show_auth: WriteSignal<bool>,
     on_open_project: Callback<RegistryProjectRef>,
-    on_rescan: Callback<RegistryProjectRef>,
-    rescan_pending: Signal<Option<String>>,
+    on_rescan: Callback<PublishedProject>,
     registry_error: Signal<Option<String>>,
 ) -> impl IntoView {
     let (editing_nickname, set_editing_nickname) = signal(false);
@@ -709,7 +707,6 @@ fn WebProfilePage(
                                 modpacks=published_projects(current_profile.modpacks)
                                 on_open_project
                                 on_rescan
-                                rescan_pending
                             >
                                 <GithubConnection profile set_profile />
                                 <div class="profile-local-actions">
@@ -1000,11 +997,8 @@ fn query_parameter(name: &str) -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         let query = web_sys::window()?.location().search().ok()?;
-        query
-            .trim_start_matches('?')
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .find_map(|(key, value)| (key == name).then(|| value.to_owned()))
+        url::form_urlencoded::parse(query.trim_start_matches('?').as_bytes())
+            .find_map(|(key, value)| (key == name).then(|| value.into_owned()))
             .filter(|value| !value.is_empty())
     }
 
@@ -1013,6 +1007,21 @@ fn query_parameter(name: &str) -> Option<String> {
         let _ = name;
         None
     }
+}
+
+fn upload_prefill_from_query() -> Option<RegistryScanRequest> {
+    Some(RegistryScanRequest {
+        repository_url: query_parameter("repository")?,
+        base_path: query_parameter("path").unwrap_or_default(),
+    })
+}
+
+fn upload_path(request: &RegistryScanRequest) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("repository", &request.repository_url)
+        .append_pair("path", &request.base_path)
+        .finish();
+    format!("/upload?{query}")
 }
 
 fn navigate_to(path: &str) {
@@ -1174,20 +1183,6 @@ async fn publish_registry_scan(
         .await
         .map_err(|error| error.to_string())?;
     parse_json_response(response, "registry publish failed").await
-}
-
-async fn start_registry_rescan(
-    project: &RegistryProjectRef,
-) -> Result<RegistryScanJobStarted, String> {
-    let response = Request::post(&format!(
-        "/registry/projects/{}/{}/rescan-job",
-        project.project_kind.route_segment(),
-        project.project_id
-    ))
-    .send()
-    .await
-    .map_err(|error| error.to_string())?;
-    parse_json_response(response, "could not start registry rescan").await
 }
 
 async fn parse_json_response<T: serde::de::DeserializeOwned>(
