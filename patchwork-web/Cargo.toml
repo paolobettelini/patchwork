@@ -26,6 +26,7 @@ futures-util = { version = "0.3", optional = true }
 flate2 = { version = "1", optional = true }
 jsonwebtoken = { version = "9.3", optional = true }
 leptos = { version = "0.8.17", default-features = false }
+mime_guess = { version = "2.0.5", optional = true }
 patchwork-database = { path = "../patchwork-database", optional = true }
 patchwork = { path = "../patchwork", optional = true }
 patchwork-registry-types = { path = "../patchwork-registry-types" }
@@ -33,6 +34,7 @@ patchwork-ui = { path = "../patchwork-ui", default-features = false }
 rand = { version = "0.9", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 resend-rs = { version = "0.29", default-features = false, features = ["rustls-tls"], optional = true }
+rust-embed = { version = "8.12.0", features = ["interpolate-folder-path"], optional = true }
 semver = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
@@ -67,11 +69,13 @@ server = [
     "dep:futures-util",
     "dep:flate2",
     "dep:jsonwebtoken",
+    "dep:mime_guess",
     "dep:patchwork-database",
     "dep:patchwork",
     "dep:rand",
     "dep:reqwest",
     "dep:resend-rs",
+    "dep:rust-embed",
     "dep:semver",
     "dep:serde_json",
     "dep:sha2",
@@ -104,4 +108,5 @@ lib-features = ["csr"]
 lib-default-features = false
 bin-features = ["server"]
 bin-default-features = false
+bin-cargo-command = "bash scripts/cargo-leptos-server.sh"
 lib-profile-release = "wasm-release"
