@@ -1816,7 +1816,20 @@ fn run_cargo_build(
     if build_mode == "release" {
         command.arg("--release");
     }
-    for argument in &options.args {
+    let custom_arguments = match options.expanded_args() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[build] Failed to parse custom arguments: {error}"),
+            );
+            return false;
+        }
+    };
+    for argument in &custom_arguments {
         command.arg(argument);
     }
     command.env("TERM", "xterm-256color");
@@ -1841,7 +1854,7 @@ fn run_cargo_build(
             } else {
                 ""
             },
-            format_command_arguments(&options.args),
+            format_command_arguments(&custom_arguments),
         ),
     );
     if !settings.cargo_target_dir.trim().is_empty() {
@@ -1906,8 +1919,21 @@ fn run_profile_executable(
         return false;
     }
 
+    let custom_arguments = match options.expanded_args() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[run] Failed to parse custom arguments: {error}"),
+            );
+            return false;
+        }
+    };
     let mut command = CommandBuilder::new(executable.as_os_str());
-    for argument in &options.args {
+    for argument in &custom_arguments {
         command.arg(argument);
     }
     let working_dir = executable
@@ -1943,7 +1969,7 @@ fn run_profile_executable(
         &format!(
             "[run] Command: {}{}",
             executable.display(),
-            format_command_arguments(&options.args)
+            format_command_arguments(&custom_arguments)
         ),
     );
     let launch = if let Some(ticket) = launch_ticket {
@@ -1953,7 +1979,7 @@ fn run_profile_executable(
                 executable,
                 working_dir,
                 backend: settings.backend.clone(),
-                args: options.args.clone(),
+                args: custom_arguments,
                 env: options.env.clone(),
                 ticket,
             })

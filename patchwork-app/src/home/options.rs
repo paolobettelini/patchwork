@@ -98,7 +98,7 @@ pub(super) fn OptionsPanel(
             <div class="profile-options-heading">
                 <div>
                     <h2>"Profile options"</h2>
-                    <p>"Arguments are passed directly to the process as separate values."</p>
+                    <p>"Argument rows are split into process values with shell-style quoting."</p>
                 </div>
                 <button
                     type="button"
@@ -255,7 +255,7 @@ fn ProcessOptionsEditor(
                 <div class="options-field-heading">
                     <div>
                         <strong>"Arguments"</strong>
-                        <small>"Add one argv value per row; no shell parsing or expansion is performed."</small>
+                        <small>"Each row accepts one or more arguments; quote values containing spaces."</small>
                     </div>
                     <button
                         type="button"

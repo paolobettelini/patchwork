@@ -50,7 +50,7 @@ TOML file is installed or opened as a desktop profile:
 
 ```toml
 [options.build]
-args = ["--config", "/absolute/path/to/mods/.cargo/config.toml"]
+args = ["--config /absolute/path/to/mods/.cargo/config.toml"]
 
 [options.build.env]
 RUST_LOG = "debug"
@@ -62,8 +62,9 @@ args = ["--connect", "127.0.0.1:25565"]
 GAME_LOG = "trace"
 ```
 
-Every item in `args` is one process argument. Patchwork does not split a shell
-command, expand variables, or interpret quotes. Build arguments are appended to
+Every item in `args` is a command-line fragment. Patchwork splits whitespace
+and supports single quotes, double quotes, and backslash escapes, but does not
+perform variable expansion or invoke a shell. Build arguments are appended to
 `cargo build` after launcher-managed arguments such as `--release`; run
 arguments are passed to the cached executable.
 

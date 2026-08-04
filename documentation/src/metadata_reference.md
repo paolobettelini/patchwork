@@ -84,7 +84,7 @@ mods = [
 ]
 
 [options.build]
-args = ["--config", "/absolute/path/to/.cargo/config.toml"]
+args = ["--config /absolute/path/to/.cargo/config.toml"]
 
 [options.build.env]
 RUST_LOG = "debug"
@@ -112,8 +112,9 @@ Fields:
 - `options.run.args`: custom arguments passed to the cached executable;
 - `options.run.env`: custom environment variables for the cached executable.
 
-Each argument is a distinct `argv` value; these arrays are not shell command
-strings. Options are used only when this file is the desktop root profile.
+Each array item is split into `argv` values using shell-style quotes and
+escapes, without invoking a shell or expanding variables. Options are used only
+when this file is the desktop root profile.
 Imported modpack options are not merged. Patchwork's read-only defaults are not
 serialized under `options` and their environment names are reserved.
 

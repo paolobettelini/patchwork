@@ -58,6 +58,14 @@ impl ProcessOptions {
     pub fn is_empty(&self) -> bool {
         self.args.is_empty() && self.env.is_empty()
     }
+
+    pub fn expanded_args(&self) -> std::result::Result<Vec<String>, String> {
+        let mut expanded = Vec::new();
+        for fragment in &self.args {
+            expanded.extend(parse_argument_fragment(fragment)?);
+        }
+        Ok(expanded)
+    }
 }
 
 const BUILD_RESERVED_ENV: &[&str] = &["TERM", "COLORTERM", "CARGO_TERM_COLOR", "CARGO_TARGET_DIR"];
@@ -84,6 +92,9 @@ fn validate_process_options(
             return Err(format!("a profile {label} argument is invalid or too long"));
         }
     }
+    options
+        .expanded_args()
+        .map_err(|reason| format!("invalid profile {label} arguments: {reason}"))?;
     for (name, value) in &options.env {
         let valid_name = !name.is_empty()
             && name.len() <= 256
@@ -109,6 +120,69 @@ fn validate_process_options(
         }
     }
     Ok(())
+}
+
+fn parse_argument_fragment(fragment: &str) -> std::result::Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut token_started = false;
+
+    for character in fragment.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            token_started = true;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if character == '\'' {
+                    quote = None;
+                } else {
+                    current.push(character);
+                }
+            }
+            Some('"') => match character {
+                '"' => quote = None,
+                '\\' => escaped = true,
+                _ => current.push(character),
+            },
+            _ => match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    token_started = true;
+                }
+                '\\' => {
+                    escaped = true;
+                    token_started = true;
+                }
+                character if character.is_whitespace() => {
+                    if token_started {
+                        arguments.push(std::mem::take(&mut current));
+                        token_started = false;
+                    }
+                }
+                _ => {
+                    current.push(character);
+                    token_started = true;
+                }
+            },
+        }
+    }
+
+    if escaped {
+        return Err("argument ends with an incomplete escape".to_owned());
+    }
+    if let Some(quote) = quote {
+        return Err(format!("argument contains an unclosed {quote} quote"));
+    }
+    if token_started {
+        arguments.push(current);
+    }
+    Ok(arguments)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

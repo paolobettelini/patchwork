@@ -85,8 +85,8 @@ For a desktop development profile, a practical setup is:
 3. Add the checkout, or the appropriate project folder, to **Registries / Local
    folders** so Browse resolves development projects locally before the remote
    registry.
-4. Open the profile's **Options** tab and add two compilation argument rows:
-   `--config` and the absolute path to `mods/.cargo/config.toml`.
+4. Open the profile's **Options** tab and add one compilation argument row:
+   `--config /absolute/path/to/mods/.cargo/config.toml`.
 
 The explicit config argument matters because Cargo Build runs with the composed
 project as its working directory. Cargo would not discover a `.cargo` directory
@@ -99,10 +99,11 @@ codegen-utils = { path = "/absolute/path/to/mods/codegen-utils" }
 ```
 
 Using an absolute config path makes the profile independent of the composed
-build cache location. The launcher stores the two values as separate `argv`
-items and passes them to `cargo build` without shell parsing. This solution is
-profile-specific: ordinary downloaded profiles continue to use their published
-Git dependencies, while a development profile can opt into local libraries.
+build cache location. The launcher splits that row into separate `argv` values
+without invoking a shell. Quote the path when it contains spaces. This solution
+is profile-specific: ordinary downloaded profiles continue to use their
+published Git dependencies, while a development profile can opt into local
+libraries.
 
 ## Debug
 

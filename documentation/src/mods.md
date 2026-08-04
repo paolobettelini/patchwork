@@ -149,9 +149,10 @@ whose `.cargo/` folder contains the patch, pass that config explicitly, or put
 an equivalent patch in an ancestor of the composed project.
 
 In the desktop launcher, pass it explicitly from the profile's **Options** tab:
-add `--config` and the absolute config path as two compilation argument rows.
-This is an opt-in profile setting; the composer does not search the mod cache
-for Cargo configuration or import it automatically.
+add `--config /absolute/path/to/config.toml` as one compilation argument row.
+The launcher splits it into two `argv` values. This is an opt-in profile
+setting; the composer does not search the mod cache for Cargo configuration or
+import it automatically.
 
 For composed projects, Patchwork generates equivalent root Git-source patches
 for selected Patchwork mods automatically. This prevents a cached path crate

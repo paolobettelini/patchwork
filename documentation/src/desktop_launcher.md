@@ -102,12 +102,14 @@ the selected mode's `--release`. Run defaults include `TERM`, `COLORTERM`, and
 `BACKEND_ADDR`; authenticated runs additionally reserve `PATCHWORK_AUTH_FD` and
 `PATCHWORK_AUTH_PIPE_VERSION`. A custom value cannot override these names.
 
-Arguments are represented as an array and passed directly as `argv`, without a
-shell. A flag and its value therefore normally occupy two rows. Build arguments
-are appended after `cargo build` and the selected debug/release option. Both the
-ordinary and authenticated executable launch paths receive the same custom run
-arguments and environment. Imported dependency modpacks do not contribute
-options; only the root profile does.
+Arguments are represented as an array of command-line fragments. Each row is
+split using shell-style whitespace, quotes, and escapes, without invoking a
+shell or expanding variables. A row such as `--config /absolute/path` therefore
+produces two `argv` values. Build arguments are appended after `cargo build` and
+the selected debug/release option. Both the ordinary and authenticated
+executable launch paths receive the same custom run arguments and environment.
+Imported dependency modpacks do not contribute options; only the root profile
+does.
 
 The gear beside the primary action configures an ordered checkbox pipeline:
 **Download**, **Compose**, **Build**. All three default to enabled. Enabling a
