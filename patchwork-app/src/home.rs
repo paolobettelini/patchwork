@@ -29,6 +29,7 @@ pub(crate) fn HomePage(
     set_modpacks: WriteSignal<Vec<LauncherModpack>>,
     selected_modpack: ReadSignal<usize>,
     set_selected_modpack: WriteSignal<usize>,
+    on_open_publisher: Callback<String>,
 ) -> impl IntoView {
     let (show_create_modal, set_show_create_modal) = signal(false);
     let (new_modpack_id, set_new_modpack_id) = signal(String::new());
@@ -706,7 +707,9 @@ pub(crate) fn HomePage(
                         </div>
 
                         {move || match active_detail_tab.get() {
-                            "details" => view! { <DetailsPanel page=dependency_page /> }.into_any(),
+                            "details" => view! {
+                                <DetailsPanel page=dependency_page on_open_publisher />
+                            }.into_any(),
                             "dependencies" => view! {
                                 <DependencyPanel
                                     page=dependency_page
@@ -720,7 +723,9 @@ pub(crate) fn HomePage(
                             }.into_any(),
                             "console" => view! { <ConsoleTerminal dependency_page build_mode /> }.into_any(),
                             "options" => view! { <OptionsPanel page=dependency_page build_mode /> }.into_any(),
-                            _ => view! { <DetailsPanel page=dependency_page /> }.into_any(),
+                            _ => view! {
+                                <DetailsPanel page=dependency_page on_open_publisher />
+                            }.into_any(),
                         }}
                     </section>
                 </Show>

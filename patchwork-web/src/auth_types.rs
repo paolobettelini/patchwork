@@ -10,6 +10,13 @@ pub struct AccountDto {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PublicAccountDto {
+    pub uuid: String,
+    pub nickname: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublishedProjectDto {
     pub id: String,
     pub title: String,
@@ -49,6 +56,15 @@ pub struct GithubConnectResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProfileDto {
     pub account: AccountDto,
+    pub github: Option<GithubAccountDto>,
+    pub mods: Vec<PublishedProjectDto>,
+    pub modpacks: Vec<PublishedProjectDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicProfileDto {
+    pub account: PublicAccountDto,
     pub github: Option<GithubAccountDto>,
     pub mods: Vec<PublishedProjectDto>,
     pub modpacks: Vec<PublishedProjectDto>,

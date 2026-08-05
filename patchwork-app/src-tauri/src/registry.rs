@@ -23,7 +23,7 @@ use crate::auth::{authenticated_server_and_token, endpoint_url};
 use crate::installer::{
     copy_cached_modpack_to_profile, install_selected_project, install_selected_project_root,
 };
-use crate::model::{AppState, LauncherInstallResult, LauncherSettings};
+use crate::model::{AppState, LauncherInstallResult, LauncherSettings, PublicProfile};
 use crate::{ensure_settings_dirs, read_modpack_file};
 
 const MAX_LOCAL_FILES: usize = 100_000;
@@ -60,6 +60,34 @@ pub(crate) async fn registry_project_details(
     tauri::async_runtime::spawn_blocking(move || fetch_project_details(&backend, project))
         .await
         .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn registry_publisher_profile(
+    state: State<'_, AppState>,
+    nickname: String,
+) -> Result<PublicProfile, String> {
+    let backend = state
+        .settings
+        .lock()
+        .map_err(|_| "launcher settings lock is poisoned".to_owned())?
+        .backend
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || fetch_publisher_profile(&backend, &nickname))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn fetch_publisher_profile(backend: &str, nickname: &str) -> Result<PublicProfile, String> {
+    let mut url = url::Url::parse(&endpoint_url(backend, "/api/profiles/")?)
+        .map_err(|error| error.to_string())?;
+    url.path_segments_mut()
+        .map_err(|_| "backend URL cannot contain profile path segments".to_owned())?
+        .push(nickname);
+    parse_json_response(
+        ureq::get(url.as_str()).call(),
+        "could not load publisher profile",
+    )
 }
 
 pub(crate) fn fetch_project_details(

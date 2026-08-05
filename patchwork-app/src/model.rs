@@ -8,6 +8,7 @@ pub(crate) enum AppTab {
     Upload,
     Project,
     Profile,
+    PublicProfile,
     Settings,
 }
 
@@ -211,6 +212,16 @@ pub(crate) struct AuthProfile {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PublicProfile {
+    pub(crate) account: PublicAccount,
+    #[serde(default)]
+    pub(crate) github: Option<GithubAccount>,
+    pub(crate) mods: Vec<PublishedProject>,
+    pub(crate) modpacks: Vec<PublishedProject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GithubAccount {
     pub(crate) github_user_id: i64,
     pub(crate) github_login: String,
@@ -223,6 +234,13 @@ pub(crate) struct AuthAccount {
     pub(crate) uuid: String,
     pub(crate) nickname: String,
     pub(crate) email: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublicAccount {
+    pub(crate) uuid: String,
+    pub(crate) nickname: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

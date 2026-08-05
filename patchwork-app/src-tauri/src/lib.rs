@@ -1184,6 +1184,7 @@ pub fn run() {
             registry::registry_create_scan,
             registry::registry_browse,
             registry::registry_project_details,
+            registry::registry_publisher_profile,
             registry::registry_add_to_profile,
             registry::registry_download_modpack_as_profile,
             registry::registry_start_scan,

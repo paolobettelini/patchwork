@@ -14,9 +14,9 @@ use patchwork_database::{
     PublishedMod, PublishedModpack,
 };
 use patchwork_web::auth_types::{
-    AccountDto, LoginRequest, OAuthTokenRequest, OAuthTokenResponse, ProfileDto,
-    PublishedProjectDto, RegisterRequest, RegistrationChallengeDto, UpdateNicknameRequest,
-    VerifyRegistrationRequest,
+    AccountDto, LoginRequest, OAuthTokenRequest, OAuthTokenResponse, ProfileDto, PublicAccountDto,
+    PublicProfileDto, PublishedProjectDto, RegisterRequest, RegistrationChallengeDto,
+    UpdateNicknameRequest, VerifyRegistrationRequest,
 };
 use rand::{Rng, RngCore};
 use serde::Deserialize;
@@ -68,6 +68,7 @@ pub(crate) fn configure(config: &mut web::ServiceConfig) {
         .route("/api/auth/logout", web::post().to(logout))
         .route("/api/account/nickname", web::post().to(update_nickname))
         .route("/api/profile", web::get().to(profile))
+        .route("/api/profiles/{nickname}", web::get().to(public_profile))
         .route("/oauth/authorize", web::get().to(oauth_authorize))
         .route("/oauth/login", web::post().to(oauth_login))
         .route("/oauth/register", web::post().to(oauth_register))
@@ -121,6 +122,19 @@ async fn auth_me(state: web::Data<AuthState>, request: HttpRequest) -> Result<Ht
 
 async fn profile(state: web::Data<AuthState>, request: HttpRequest) -> Result<HttpResponse> {
     auth_me(state, request).await
+}
+
+async fn public_profile(
+    state: web::Data<AuthState>,
+    nickname: web::Path<String>,
+) -> Result<HttpResponse> {
+    let nickname = nickname.into_inner();
+    let account = state
+        .database
+        .get_account_by_nickname(&nickname)
+        .map_err(to_bad_request_or_internal)?
+        .ok_or_else(|| error::ErrorNotFound("publisher profile not found"))?;
+    Ok(HttpResponse::Ok().json(public_profile_for_account(&state.database, &account)?))
 }
 
 async fn update_nickname(
@@ -698,13 +712,13 @@ fn profile_for_account(database: &Database, account: &Account) -> Result<Profile
         .list_mods_by_publisher(uuid, pagination)
         .map_err(to_bad_request_or_internal)?
         .into_iter()
-        .map(mod_to_dto)
+        .map(|project| mod_to_dto(project, true))
         .collect();
     let modpacks = database
         .list_modpacks_by_publisher(uuid, pagination)
         .map_err(to_bad_request_or_internal)?
         .into_iter()
-        .map(modpack_to_dto)
+        .map(|project| modpack_to_dto(project, true))
         .collect();
     let github = database
         .get_github_account(uuid)
@@ -723,12 +737,43 @@ fn profile_for_account(database: &Database, account: &Account) -> Result<Profile
     })
 }
 
+fn public_profile_for_account(database: &Database, account: &Account) -> Result<PublicProfileDto> {
+    let uuid = parse_account_uuid(account)?;
+    let pagination = Pagination::new(100, 0).map_err(to_bad_request_or_internal)?;
+    let mods = database
+        .list_mods_by_publisher(uuid, pagination)
+        .map_err(to_bad_request_or_internal)?
+        .into_iter()
+        .map(|project| mod_to_dto(project, false))
+        .collect();
+    let modpacks = database
+        .list_modpacks_by_publisher(uuid, pagination)
+        .map_err(to_bad_request_or_internal)?
+        .into_iter()
+        .map(|project| modpack_to_dto(project, false))
+        .collect();
+    let github = database
+        .get_github_account(uuid)
+        .map_err(to_bad_request_or_internal)?
+        .map(crate::server_github::github_account_dto);
+
+    Ok(PublicProfileDto {
+        account: PublicAccountDto {
+            uuid: account.uuid.clone(),
+            nickname: account.nickname.clone(),
+        },
+        github,
+        mods,
+        modpacks,
+    })
+}
+
 fn parse_account_uuid(account: &Account) -> Result<Uuid> {
     Uuid::parse_str(&account.uuid)
         .map_err(|_| error::ErrorInternalServerError("stored account UUID is invalid"))
 }
 
-fn mod_to_dto(project: PublishedMod) -> PublishedProjectDto {
+fn mod_to_dto(project: PublishedMod, can_rescan: bool) -> PublishedProjectDto {
     PublishedProjectDto {
         id: project.id,
         title: project.title,
@@ -737,11 +782,11 @@ fn mod_to_dto(project: PublishedMod) -> PublishedProjectDto {
         latest_version: Some(project.latest_version),
         repository_url: Some(project.repository_url),
         repository_path: Some(project.repository_path),
-        can_rescan: true,
+        can_rescan,
     }
 }
 
-fn modpack_to_dto(project: PublishedModpack) -> PublishedProjectDto {
+fn modpack_to_dto(project: PublishedModpack, can_rescan: bool) -> PublishedProjectDto {
     PublishedProjectDto {
         id: project.id,
         title: project.title,
@@ -750,7 +795,7 @@ fn modpack_to_dto(project: PublishedModpack) -> PublishedProjectDto {
         latest_version: Some(project.latest_version),
         repository_url: Some(project.repository_url),
         repository_path: Some(project.repository_path),
-        can_rescan: true,
+        can_rescan,
     }
 }
 

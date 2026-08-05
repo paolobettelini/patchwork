@@ -16,6 +16,7 @@ otherwise.
 | `POST` | `/api/auth/logout` | Optional | Revoke the supplied cookie session or bearer token. |
 | `POST` | `/api/account/nickname` | Required | Change the mutable nickname. |
 | `GET` | `/api/profile` | Required | Profile alias shared with the desktop app. |
+| `GET` | `/api/profiles/{nickname}` | Public | Return a publisher's public identity, optional GitHub link, mods, and modpacks without exposing email or private actions. |
 
 Registration JSON uses `email`, `nickname`, and `passwordSha256`, and returns
 HTTP `202` with `verificationId`, normalized `email`, and `expiresIn` seconds.
@@ -25,6 +26,11 @@ the profile and sets the session cookie. Login uses `identifier` and
 the stable Patchwork UUID, an optional linked GitHub account, and published
 projects. Published mods and modpacks include their latest version, repository
 URL/path, and `canRescan: true`.
+
+The public profile response contains the stable Patchwork UUID and current
+nickname but never the account email. Its project entries use
+`canRescan: false`; clients may expose owner controls only after independently
+matching that UUID with the authenticated `/api/auth/me` profile.
 
 ## Desktop OAuth
 
@@ -213,8 +219,9 @@ aggregation, artifacts, and desktop profile actions.
 | --- | --- | --- |
 | `GET` | `/styles.css` | Shared site stylesheet. |
 | `GET` | `/logo.png` | Patchwork logo. |
+| `GET` | `/favicon.ico` | Patchwork browser icon. |
 | `GET` | `/pkg/*` | JavaScript and WebAssembly produced by `cargo leptos build`. |
-| `GET` | `/`, `/browse`, `/upload`, `/profile`, other non-API paths | Serve the SPA entry point. `/upload?job=<UUID>` follows progress and `/upload?scan=<UUID>` reloads a persisted preview. |
+| `GET` | `/`, `/browse`, `/upload`, `/profile/{nickname}`, other non-API paths | Serve the SPA entry point. Unknown client routes render the themed 404 page; `/upload?job=<UUID>` follows progress and `/upload?scan=<UUID>` reloads a persisted preview. |
 
 Unknown API-like paths currently reach the general SPA fallback unless a
 configured route matches first. New APIs should therefore always be registered

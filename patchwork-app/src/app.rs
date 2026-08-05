@@ -1,15 +1,19 @@
 use crate::{
     home::HomePage,
     icons::{ArrowRightToBracketIcon, GearIcon, HomeIcon, SearchIcon},
-    model::{AppTab, LauncherAuthStatus, LauncherModpack, LauncherSettings, RegistryDownloadEvent},
+    model::{
+        AppTab, LauncherAuthStatus, LauncherModpack, LauncherSettings, PublicProfile,
+        RegistryDownloadEvent,
+    },
     settings::SettingsPage,
     tauri_bridge::{
         auth_status, disconnect_github, download_profile_dependencies, list_modpacks,
         listen_patchwork_auth, listen_registry_download, load_launcher_settings, logout_auth,
         refresh_auth_profile, refresh_profiles, registry_add_to_profile, registry_browse,
         registry_download_modpack_as_profile, registry_download_status, registry_get_scan,
-        registry_project_details, registry_publish_scan, registry_scan_progress,
-        registry_start_scan, start_github_connect, start_oauth_login, update_auth_nickname,
+        registry_project_details, registry_publish_scan, registry_publisher_profile,
+        registry_scan_progress, registry_start_scan, start_github_connect, start_oauth_login,
+        update_auth_nickname,
     },
 };
 use gloo_timers::future::TimeoutFuture;
@@ -53,6 +57,9 @@ pub(crate) fn App() -> impl IntoView {
     let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
     let (project_pending, set_project_pending) = signal(false);
     let (project_error, set_project_error) = signal(None::<String>);
+    let (public_profile, set_public_profile) = signal(None::<PublicProfile>);
+    let (public_profile_pending, set_public_profile_pending) = signal(false);
+    let (public_profile_error, set_public_profile_error) = signal(None::<String>);
     let (download_event, set_download_event) = signal(None::<RegistryDownloadEvent>);
 
     let open_registry_project = Callback::new(move |project: RegistryProjectRef| {
@@ -71,6 +78,29 @@ pub(crate) fn App() -> impl IntoView {
                 Err(error) => set_project_error.set(Some(js_error_message(error))),
             }
             set_project_pending.set(false);
+        });
+    });
+
+    let open_publisher = Callback::new(move |nickname: String| {
+        let own_profile = auth
+            .get_untracked()
+            .and_then(|status| status.profile)
+            .is_some_and(|profile| profile.account.nickname == nickname);
+        if own_profile {
+            set_active_tab.set(AppTab::Profile);
+            return;
+        }
+
+        set_public_profile.set(None);
+        set_public_profile_error.set(None);
+        set_public_profile_pending.set(true);
+        set_active_tab.set(AppTab::PublicProfile);
+        leptos::task::spawn_local(async move {
+            match registry_publisher_profile(&nickname).await {
+                Ok(profile) => set_public_profile.set(Some(profile)),
+                Err(error) => set_public_profile_error.set(Some(js_error_message(error))),
+            }
+            set_public_profile_pending.set(false);
         });
     });
 
@@ -367,6 +397,7 @@ pub(crate) fn App() -> impl IntoView {
                         set_modpacks
                         selected_modpack
                         set_selected_modpack
+                        on_open_publisher=open_publisher
                     />
                 </section>
 
@@ -413,6 +444,7 @@ pub(crate) fn App() -> impl IntoView {
                         pending=Signal::from(project_pending)
                         error=Signal::from(project_error)
                         on_open_dependency=open_registry_project
+                        on_open_publisher=open_publisher
                     />
                 </section>
 
@@ -426,6 +458,15 @@ pub(crate) fn App() -> impl IntoView {
                         on_open_project=open_registry_project
                         on_rescan=profile_rescan
                         registry_error=Signal::from(registry_error)
+                    />
+                </section>
+
+                <section class=move || page_class(active_tab.get() == AppTab::PublicProfile)>
+                    <AppPublicProfilePage
+                        profile=Signal::from(public_profile)
+                        pending=Signal::from(public_profile_pending)
+                        error=Signal::from(public_profile_error)
+                        on_open_project=open_registry_project
                     />
                 </section>
 
@@ -632,7 +673,7 @@ fn AppProfilePage(
                 .map(|profile| view! {
                     <div class="profile-page-shell">
                         <ProfilePage
-                            account_email=profile.account.email.clone()
+                            account_email=Some(profile.account.email.clone())
                             account_name=profile.account.nickname.clone()
                             mods=ui_projects(&profile.mods)
                             modpacks=ui_projects(&profile.modpacks)
@@ -723,6 +764,75 @@ fn AppProfilePage(
                 }.into_any())
         }}
     }
+}
+
+#[component]
+fn AppPublicProfilePage(
+    profile: Signal<Option<PublicProfile>>,
+    pending: Signal<bool>,
+    error: Signal<Option<String>>,
+    on_open_project: Callback<RegistryProjectRef>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || pending.get()>
+            <div class="profile-load-state">
+                <span class="project-page-spinner"></span>
+                <strong>"Loading publisher profile..."</strong>
+            </div>
+        </Show>
+        <Show when=move || error.get().is_some()>
+            <section class="profile-missing-state">
+                <UserIcon />
+                <p class="catalog-kicker">"Profile unavailable"</p>
+                <h1>"Publisher not found"</h1>
+                <p>{move || error.get().unwrap_or_default()}</p>
+            </section>
+        </Show>
+        {move || profile.get().map(|profile| view! {
+            <div class="profile-page-shell">
+                <ProfilePage
+                    account_email=None
+                    account_name=profile.account.nickname
+                    mods=ui_projects(&profile.mods)
+                    modpacks=ui_projects(&profile.modpacks)
+                    on_open_project
+                    on_rescan=Callback::new(|_: UiPublishedProject| {})
+                >
+                    <AppPublicGithubConnection github=profile.github />
+                </ProfilePage>
+            </div>
+        })}
+    }
+}
+
+#[component]
+fn AppPublicGithubConnection(github: Option<crate::model::GithubAccount>) -> impl IntoView {
+    github.map(|github| {
+        let github_url = format!("https://github.com/{}", github.github_login);
+        view! {
+            <section class="github-connection public-github-connection">
+                <div class="github-connection-heading">
+                    <div>
+                        <p class="catalog-kicker">"Connected account"</p>
+                        <h2>"GitHub"</h2>
+                    </div>
+                    <GithubIcon />
+                </div>
+                <a class="github-account-row" href=github_url target="_blank" rel="noreferrer">
+                    <img
+                        src=github.github_avatar_url
+                        alt="GitHub avatar"
+                        loading="lazy"
+                        referrerpolicy="no-referrer"
+                    />
+                    <div>
+                        <strong>{format!("@{}", github.github_login)}</strong>
+                        <span>"View GitHub profile"</span>
+                    </div>
+                </a>
+            </section>
+        }
+    })
 }
 
 #[component]

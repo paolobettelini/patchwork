@@ -10,6 +10,7 @@ pub fn RegistryProjectPage(
     pending: Signal<bool>,
     error: Signal<Option<String>>,
     on_open_dependency: Callback<RegistryProjectRef>,
+    on_open_publisher: Callback<String>,
 ) -> impl IntoView {
     let (active_tab, set_active_tab) = signal("details");
 
@@ -88,7 +89,10 @@ pub fn RegistryProjectPage(
                                 />
                             }
                         >
-                            <RegistryDetails details=details_for_panel.clone() />
+                            <RegistryDetails
+                                details=details_for_panel.clone()
+                                on_open_publisher
+                            />
                         </Show>
                     </section>
                 }
@@ -98,8 +102,12 @@ pub fn RegistryProjectPage(
 }
 
 #[component]
-fn RegistryDetails(details: RegistryProjectDetails) -> impl IntoView {
+fn RegistryDetails(
+    details: RegistryProjectDetails,
+    on_open_publisher: Callback<String>,
+) -> impl IntoView {
     let publisher_name = details.publisher_name;
+    let publisher_for_click = publisher_name.clone();
     let publisher_uuid = details.publisher_uuid;
     let published_at = display_date(&details.published_at);
     let repository_url = details.repository_url;
@@ -110,7 +118,19 @@ fn RegistryDetails(details: RegistryProjectDetails) -> impl IntoView {
     let manifest = details.manifest_sha256.clone();
     view! {
         <dl class="registry-details-grid">
-            <div><dt>"Publisher"</dt><dd><strong>{publisher_name}</strong><code>{publisher_uuid}</code></dd></div>
+            <div>
+                <dt>"Publisher"</dt>
+                <dd>
+                    <button
+                        type="button"
+                        class="registry-publisher-link"
+                        on:click=move |_| on_open_publisher.run(publisher_for_click.clone())
+                    >
+                        {publisher_name}
+                    </button>
+                    <code>{publisher_uuid}</code>
+                </dd>
+            </div>
             <div><dt>"Published"</dt><dd>{published_at}</dd></div>
             <div><dt>"Repository"</dt><dd><a href=repository_link target="_blank" rel="noreferrer">{repository_url}</a></dd></div>
             <div><dt>"Directory"</dt><dd><code>{repository_path}</code></dd></div>

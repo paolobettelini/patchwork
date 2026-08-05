@@ -1,8 +1,8 @@
 use std::fmt::Write as _;
 
 use crate::auth_types::{
-    GithubAccountDto, LoginRequest, ProfileDto, PublishedProjectDto, RegisterRequest,
-    RegistrationChallengeDto, UpdateNicknameRequest, VerifyRegistrationRequest,
+    GithubAccountDto, LoginRequest, ProfileDto, PublicProfileDto, PublishedProjectDto,
+    RegisterRequest, RegistrationChallengeDto, UpdateNicknameRequest, VerifyRegistrationRequest,
 };
 use gloo_net::http::Request;
 use gloo_timers::future::TimeoutFuture;
@@ -30,6 +30,7 @@ enum WebPage {
     Upload,
     Profile,
     Project,
+    NotFound,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +69,9 @@ pub(crate) fn WebApp() -> impl IntoView {
     let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
     let (project_pending, set_project_pending) = signal(false);
     let (project_error, set_project_error) = signal(None::<String>);
+    let (viewed_profile, set_viewed_profile) = signal(None::<PublicProfileDto>);
+    let (viewed_profile_pending, set_viewed_profile_pending) = signal(false);
+    let (viewed_profile_error, set_viewed_profile_error) = signal(None::<String>);
 
     let open_project = Callback::new(move |project: RegistryProjectRef| {
         if project.project_kind == RegistryProjectKind::Mod
@@ -105,6 +109,10 @@ pub(crate) fn WebApp() -> impl IntoView {
             }
             set_browse_pending.set(false);
         });
+    });
+
+    let open_publisher = Callback::new(move |nickname: String| {
+        navigate_to(&profile_path(&nickname));
     });
 
     let upload_sign_in = Callback::new(move |()| set_show_auth.set(true));
@@ -172,11 +180,28 @@ pub(crate) fn WebApp() -> impl IntoView {
         }
     });
 
+    let profile_without_username = page == WebPage::Profile && current_profile_nickname().is_none();
     leptos::task::spawn_local(async move {
         if let Ok(current_profile) = fetch_profile().await {
+            if profile_without_username {
+                navigate_to(&profile_path(&current_profile.account.nickname));
+            }
             set_profile.set(Some(current_profile));
         }
     });
+
+    if page == WebPage::Profile {
+        if let Some(nickname) = current_profile_nickname() {
+            set_viewed_profile_pending.set(true);
+            leptos::task::spawn_local(async move {
+                match fetch_public_profile(&nickname).await {
+                    Ok(public_profile) => set_viewed_profile.set(Some(public_profile)),
+                    Err(message) => set_viewed_profile_error.set(Some(message)),
+                }
+                set_viewed_profile_pending.set(false);
+            });
+        }
+    }
 
     if page == WebPage::Browse {
         browse_search.run(RegistryBrowseRequest::default());
@@ -264,6 +289,9 @@ pub(crate) fn WebApp() -> impl IntoView {
                         <WebProfilePage
                             profile
                             set_profile
+                            viewed_profile
+                            viewed_profile_pending
+                            viewed_profile_error
                             set_show_auth
                             on_open_project=open_project
                             on_rescan=profile_rescan
@@ -276,8 +304,10 @@ pub(crate) fn WebApp() -> impl IntoView {
                             pending=Signal::from(project_pending)
                             error=Signal::from(project_error)
                             on_open_dependency=open_project
+                            on_open_publisher=open_publisher
                         />
                     }.into_any(),
+                    WebPage::NotFound => view! { <NotFoundPage /> }.into_any(),
                 }}
             </main>
 
@@ -356,11 +386,14 @@ fn TopBar(
                         profile
                             .get()
                             .map(|profile| {
+                                let profile_href = profile_path(&profile.account.nickname);
+                                let own_profile_is_active = active_page == WebPage::Profile
+                                    && current_path() == profile_href;
                                 view! {
                                     <div class="profile-menu">
                                         <button
                                             type="button"
-                                            class=move || profile_button_class(active_page == WebPage::Profile)
+                                            class=profile_button_class(own_profile_is_active)
                                             on:click=move |_| set_show_profile_menu.update(|show| *show = !*show)
                                         >
                                             <UserIcon />
@@ -368,7 +401,7 @@ fn TopBar(
                                         </button>
                                         <Show when=move || show_profile_menu.get()>
                                             <div class="profile-dropdown">
-                                                <a href="/profile" on:click=move |_| set_show_profile_menu.set(false)>
+                                                <a href=profile_href.clone() on:click=move |_| set_show_profile_menu.set(false)>
                                                     <UserIcon />
                                                     <span>"Profile"</span>
                                                 </a>
@@ -655,6 +688,9 @@ fn PasswordRequirements(
 fn WebProfilePage(
     profile: ReadSignal<Option<ProfileDto>>,
     set_profile: WriteSignal<Option<ProfileDto>>,
+    viewed_profile: ReadSignal<Option<PublicProfileDto>>,
+    viewed_profile_pending: ReadSignal<bool>,
+    viewed_profile_error: ReadSignal<Option<String>>,
     set_show_auth: WriteSignal<bool>,
     on_open_project: Callback<RegistryProjectRef>,
     on_rescan: Callback<PublishedProject>,
@@ -664,56 +700,116 @@ fn WebProfilePage(
     let (nickname_draft, set_nickname_draft) = signal(String::new());
     let (nickname_error, set_nickname_error) = signal(None::<String>);
 
-    let start_edit = move |_| {
+    let start_edit = Callback::new(move |()| {
         if let Some(profile) = profile.get() {
             set_nickname_draft.set(profile.account.nickname);
             set_nickname_error.set(None);
             set_editing_nickname.set(true);
         }
-    };
+    });
 
-    let save_nickname = move |_| {
+    let save_nickname = Callback::new(move |()| {
         let nickname = nickname_draft.get();
         set_nickname_error.set(None);
         leptos::task::spawn_local(async move {
             match update_nickname(nickname).await {
-                Ok(profile) => {
-                    set_profile.set(Some(profile));
+                Ok(updated_profile) => {
+                    let path = profile_path(&updated_profile.account.nickname);
+                    set_profile.set(Some(updated_profile));
                     set_editing_nickname.set(false);
+                    navigate_to(&path);
                 }
                 Err(error) => set_nickname_error.set(Some(error)),
             }
         });
-    };
+    });
 
-    let logout = move |_| {
+    let logout = Callback::new(move |()| {
         leptos::task::spawn_local(async move {
             let _ = logout_site().await;
             set_profile.set(None);
         });
-    };
+    });
 
     view! {
         {move || {
-            profile
-                .get()
-                .map(|current_profile| {
-                    view! {
-                        <div class="profile-page-shell">
-                            <ProfilePage
-                                account_email=current_profile.account.email
-                                account_name=current_profile.account.nickname
-                                mods=published_projects(current_profile.mods)
-                                modpacks=published_projects(current_profile.modpacks)
-                                on_open_project
-                                on_rescan
-                            >
+            if viewed_profile_pending.get() {
+                return view! {
+                    <div class="profile-load-state">
+                        <span class="project-page-spinner"></span>
+                        <strong>"Loading publisher profile..."</strong>
+                    </div>
+                }.into_any();
+            }
+
+            if let Some(error) = viewed_profile_error.get() {
+                return view! {
+                    <section class="profile-missing-state">
+                        <UserIcon />
+                        <p class="catalog-kicker">"Profile not found"</p>
+                        <h1>"No publisher at this address"</h1>
+                        <p>{error}</p>
+                        <a class="catalog-primary-action" href="/browse">
+                            <SearchIcon />
+                            <span>"Browse projects"</span>
+                        </a>
+                    </section>
+                }.into_any();
+            }
+
+            let Some(public_profile) = viewed_profile.get() else {
+                return view! {
+                    <section class="signed-out-profile">
+                        <UserIcon />
+                        <h1>"Publisher profile"</h1>
+                        <p>"Sign in to open your own publisher profile."</p>
+                        <button type="button" class="sign-in-button" on:click=move |_| set_show_auth.set(true)>
+                            <span>"Sign in"</span>
+                            <ArrowRightToBracketIcon />
+                        </button>
+                    </section>
+                }.into_any();
+            };
+
+            let owner_profile = profile.get().filter(|current| {
+                current.account.uuid == public_profile.account.uuid
+            });
+            let is_owner = owner_profile.is_some();
+            let account_email = owner_profile
+                .as_ref()
+                .map(|current| current.account.email.clone());
+            let mods = owner_profile
+                .as_ref()
+                .map(|current| current.mods.clone())
+                .unwrap_or_else(|| public_profile.mods.clone());
+            let modpacks = owner_profile
+                .as_ref()
+                .map(|current| current.modpacks.clone())
+                .unwrap_or_else(|| public_profile.modpacks.clone());
+            let public_github = public_profile.github.clone();
+
+            view! {
+                <div class="profile-page-shell">
+                    <ProfilePage
+                        account_email
+                        account_name=public_profile.account.nickname
+                        mods=published_projects(mods)
+                        modpacks=published_projects(modpacks)
+                        on_open_project
+                        on_rescan
+                    >
+                        {if is_owner {
+                            view! {
                                 <GithubConnection profile set_profile />
                                 <div class="profile-local-actions">
                                     <Show
                                         when=move || editing_nickname.get()
                                         fallback=move || view! {
-                                            <button type="button" class="catalog-secondary-action" on:click=start_edit>
+                                            <button
+                                                type="button"
+                                                class="catalog-secondary-action"
+                                                on:click=move |_| start_edit.run(())
+                                            >
                                                 "Change username"
                                             </button>
                                         }
@@ -724,41 +820,70 @@ fn WebProfilePage(
                                                 prop:value=move || nickname_draft.get()
                                                 on:input=move |event| set_nickname_draft.set(event_target_value(&event))
                                             />
-                                            <button type="button" class="catalog-primary-action" on:click=save_nickname>"Save"</button>
-                                            <button type="button" class="catalog-secondary-action" on:click=move |_| set_editing_nickname.set(false)>"Cancel"</button>
+                                            <button
+                                                type="button"
+                                                class="catalog-primary-action"
+                                                on:click=move |_| save_nickname.run(())
+                                            >
+                                                "Save"
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="catalog-secondary-action"
+                                                on:click=move |_| set_editing_nickname.set(false)
+                                            >
+                                                "Cancel"
+                                            </button>
                                         </div>
                                     </Show>
-                                    <button type="button" class="catalog-secondary-action" on:click=logout>
+                                    <button
+                                        type="button"
+                                        class="danger-secondary-action"
+                                        on:click=move |_| logout.run(())
+                                    >
                                         "Logout"
                                     </button>
                                 </div>
                                 <Show when=move || nickname_error.get().is_some()>
                                     <p class="auth-error">{move || nickname_error.get().unwrap_or_default()}</p>
                                 </Show>
-                            </ProfilePage>
-                            <Show when=move || registry_error.get().is_some()>
-                                <p class="auth-error">{move || registry_error.get().unwrap_or_default()}</p>
-                            </Show>
-                        </div>
-                    }
-                    .into_any()
-                })
-                .unwrap_or_else(|| {
-                    view! {
-                        <section class="signed-out-profile">
-                            <UserIcon />
-                            <h1>"Publisher profile"</h1>
-                            <p>"Sign in to see your published mods and modpacks."</p>
-                            <button type="button" class="sign-in-button" on:click=move |_| set_show_auth.set(true)>
-                                <span>"Sign in"</span>
-                                <ArrowRightToBracketIcon />
-                            </button>
-                        </section>
-                    }
-                    .into_any()
-                })
+                            }.into_any()
+                        } else {
+                            view! { <PublicGithubConnection github=public_github /> }.into_any()
+                        }}
+                    </ProfilePage>
+                    <Show when=move || is_owner && registry_error.get().is_some()>
+                        <p class="auth-error">{move || registry_error.get().unwrap_or_default()}</p>
+                    </Show>
+                </div>
+            }.into_any()
         }}
     }
+}
+
+#[component]
+fn PublicGithubConnection(github: Option<GithubAccountDto>) -> impl IntoView {
+    github.map(|github| {
+        let github_url = format!("https://github.com/{}", github.github_login);
+        view! {
+            <section class="github-connection public-github-connection">
+                <div class="github-connection-heading">
+                    <div>
+                        <p class="catalog-kicker">"Connected account"</p>
+                        <h2>"GitHub"</h2>
+                    </div>
+                    <GithubIcon />
+                </div>
+                <a class="github-account-row" href=github_url target="_blank" rel="noreferrer">
+                    <img src=github.github_avatar_url alt="GitHub avatar" loading="lazy" referrerpolicy="no-referrer" />
+                    <div>
+                        <strong>{format!("@{}", github.github_login)}</strong>
+                        <span>"View GitHub profile"</span>
+                    </div>
+                </a>
+            </section>
+        }
+    })
 }
 
 #[component]
@@ -891,6 +1016,32 @@ fn FeatureCard(title: &'static str, text: &'static str) -> impl IntoView {
     }
 }
 
+#[component]
+fn NotFoundPage() -> impl IntoView {
+    view! {
+        <section class="not-found-page">
+            <div class="not-found-mark" aria-hidden="true">
+                <span>"4"</span>
+                <img src="/logo.png" alt="" />
+                <span>"4"</span>
+            </div>
+            <p class="catalog-kicker">"Loose thread"</p>
+            <h1>"Page not found"</h1>
+            <p>"This address is not part of the current Patchwork pattern."</p>
+            <div class="not-found-actions">
+                <a class="catalog-primary-action" href="/">
+                    <HomeIcon />
+                    <span>"Back home"</span>
+                </a>
+                <a class="catalog-secondary-action" href="/browse">
+                    <SearchIcon />
+                    <span>"Browse registry"</span>
+                </a>
+            </div>
+        </section>
+    }
+}
+
 fn top_tab_class(is_active: bool) -> &'static str {
     if is_active {
         "top-tab active"
@@ -910,12 +1061,27 @@ fn profile_button_class(is_active: bool) -> &'static str {
 fn current_page() -> WebPage {
     let path = current_path();
     match path.as_str() {
+        "/" => WebPage::Home,
         "/browse" => WebPage::Browse,
         "/upload" => WebPage::Upload,
         "/profile" => WebPage::Profile,
+        _ if current_profile_nickname().is_some() => WebPage::Profile,
         _ if current_project_ref().is_some() => WebPage::Project,
-        _ => WebPage::Home,
+        _ => WebPage::NotFound,
     }
+}
+
+fn current_profile_nickname() -> Option<String> {
+    let path = current_path();
+    let mut segments = path.trim_matches('/').split('/');
+    if segments.next()? != "profile" {
+        return None;
+    }
+    let nickname = segments.next()?.trim();
+    if nickname.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    Some(nickname.to_owned())
 }
 
 fn current_project_ref() -> Option<RegistryProjectRef> {
@@ -945,6 +1111,11 @@ fn project_path(project: &RegistryProjectRef) -> String {
         project.project_kind.route_segment(),
         project.project_id
     )
+}
+
+fn profile_path(nickname: &str) -> String {
+    let encoded: String = url::form_urlencoded::byte_serialize(nickname.as_bytes()).collect();
+    format!("/profile/{encoded}")
 }
 
 fn load_stored_theme() -> String {
@@ -1046,6 +1217,17 @@ async fn fetch_profile() -> Result<ProfileDto, String> {
             .unwrap_or_else(|_| "not authenticated".to_string()));
     }
     response.json().await.map_err(|error| error.to_string())
+}
+
+async fn fetch_public_profile(nickname: &str) -> Result<PublicProfileDto, String> {
+    let response = Request::get(&format!("/api/profiles/{nickname}"))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 404 {
+        return Err("The requested Patchwork publisher does not exist.".to_owned());
+    }
+    parse_json_response(response, "could not load publisher profile").await
 }
 
 async fn fetch_registry_browse(

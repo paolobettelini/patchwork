@@ -79,9 +79,15 @@ cargo run --features server -- --config patchwork.toml
 module in `dist/pkg`. Serving a Cargo-produced native `.wasm` file in its place
 causes a browser magic-number or WebAssembly validation error.
 
-Actix serves `/styles.css`, `/logo.png`, and `/pkg/*` directly. Other non-API
+Debug servers read frontend files directly from `dist`. A release build made
+with `cargo leptos build --release` embeds the complete runtime asset tree in
+the `patchwork-web` executable, so deployment needs only that binary and its
+runtime configuration files; it does not depend on `dist` or the process
+working directory.
+
+Actix serves `/styles.css`, `/logo.png`, `/favicon.ico`, and `/pkg/*` directly. Other non-API
 GET paths fall back to the Leptos `index.html`, allowing routes such as
-`/browse`, `/upload`, `/profile`, `/mods/<id>`, and `/modpacks/<id>` to be
+`/browse`, `/upload`, `/profile/<nickname>`, `/mods/<id>`, and `/modpacks/<id>` to be
 handled client-side.
 
 ## Themes
@@ -125,6 +131,14 @@ Each published mod and modpack exposes **Rescan**. The site starts the same back
 redirects to `/upload?job=<UUID>` for live progress, and ends on the private
 persisted preview. A completed scan can still be reloaded through
 `/upload?scan=<UUID>` for its 20-minute lifetime.
+
+Publisher names on project detail pages link to `/profile/<nickname>`. Public
+profiles show the publisher's projects and optional GitHub identity without
+email, Rescan, account, or logout controls. When the displayed stable UUID
+matches the authenticated account, the same route uses `/api/auth/me` to add
+GitHub management, nickname editing, logout, and Rescan controls. The desktop
+launcher exposes the same public view only through clickable publisher names;
+it does not add public profiles to its top-level tabs.
 
 ## Database startup
 

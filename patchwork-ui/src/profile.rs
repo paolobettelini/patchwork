@@ -41,7 +41,7 @@ impl PublishedProject {
 
 #[component]
 pub fn ProfilePage(
-    account_email: String,
+    account_email: Option<String>,
     account_name: String,
     mods: Vec<PublishedProject>,
     modpacks: Vec<PublishedProject>,
@@ -67,7 +67,7 @@ pub fn ProfilePage(
                 <div class="profile-identity">
                     <p class="catalog-kicker">"Publisher profile"</p>
                     <h1>{account_name}</h1>
-                    <p>{account_email}</p>
+                    {account_email.map(|email| view! { <p>{email}</p> })}
                 </div>
 
                 <div class="profile-summary">

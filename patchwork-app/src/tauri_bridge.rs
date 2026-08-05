@@ -1,8 +1,8 @@
 use crate::model::{
     DependencyPage, LauncherAuthStatus, LauncherCacheUsage, LauncherInstallResult, LauncherModpack,
     LauncherSettings, PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus,
-    ProfileOptions, ProfileOptionsView, RegistryDownloadEvent, RegistryInstallReport,
-    SelectedIconFile,
+    ProfileOptions, ProfileOptionsView, PublicProfile, RegistryDownloadEvent,
+    RegistryInstallReport, SelectedIconFile,
 };
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
@@ -109,6 +109,14 @@ pub(crate) async fn registry_project_details(
         project: RegistryProjectRef,
     }
     invoke("registry_project_details", &Args { project }).await
+}
+
+pub(crate) async fn registry_publisher_profile(nickname: &str) -> Result<PublicProfile, JsValue> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        nickname: &'a str,
+    }
+    invoke("registry_publisher_profile", &Args { nickname }).await
 }
 
 pub(crate) async fn registry_add_to_profile(

@@ -2,7 +2,10 @@ use crate::model::DependencyPage;
 use leptos::prelude::*;
 
 #[component]
-pub(super) fn DetailsPanel(page: ReadSignal<Option<DependencyPage>>) -> impl IntoView {
+pub(super) fn DetailsPanel(
+    page: ReadSignal<Option<DependencyPage>>,
+    on_open_publisher: Callback<String>,
+) -> impl IntoView {
     view! {
         <div class="local-details-panel">
             {move || page.get().map(|page| {
@@ -12,7 +15,7 @@ pub(super) fn DetailsPanel(page: ReadSignal<Option<DependencyPage>>) -> impl Int
                     _ => "Mod",
                 };
                 let publication = page.published_at.unwrap_or_else(|| "-".to_owned());
-                let publisher = page.publisher_name.unwrap_or_else(|| "-".to_owned());
+                let publisher = page.publisher_name;
                 let repository = page.repository_url.unwrap_or_else(|| "-".to_owned());
                 let repository_path = page.repository_path.unwrap_or_else(|| "-".to_owned());
                 let source_commit = page.source_commit.unwrap_or_else(|| "-".to_owned());
@@ -24,7 +27,23 @@ pub(super) fn DetailsPanel(page: ReadSignal<Option<DependencyPage>>) -> impl Int
                         <div><dt>"ID"</dt><dd><code>{page.id}</code></dd></div>
                         <div><dt>"Version"</dt><dd>{page.version}</dd></div>
                         <div><dt>"Published"</dt><dd>{publication}</dd></div>
-                        <div><dt>"Publisher"</dt><dd>{publisher}</dd></div>
+                        <div>
+                            <dt>"Publisher"</dt>
+                            <dd>
+                                {publisher.map(|publisher| {
+                                    let publisher_for_click = publisher.clone();
+                                    view! {
+                                        <button
+                                            type="button"
+                                            class="registry-publisher-link"
+                                            on:click=move |_| on_open_publisher.run(publisher_for_click.clone())
+                                        >
+                                            {publisher}
+                                        </button>
+                                    }.into_any()
+                                }).unwrap_or_else(|| view! { <span>"-"</span> }.into_any())}
+                            </dd>
+                        </div>
                         <div><dt>"Downloads"</dt><dd>{format_downloads(page.downloads)}</dd></div>
                         <div class="wide"><dt>"Description"</dt><dd>{page.description}</dd></div>
                         <div class="wide"><dt>"Repository"</dt><dd><code>{repository}</code></dd></div>
