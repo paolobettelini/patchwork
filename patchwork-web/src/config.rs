@@ -8,11 +8,13 @@ use url::Url;
 
 const DEFAULT_ADDRESS: &str = "0.0.0.0";
 const DEFAULT_PORT: u16 = 8080;
+const DEFAULT_BASE_PATH: &str = "/";
 
 #[derive(Clone)]
 pub(crate) struct ServerConfig {
     pub(crate) address: String,
     pub(crate) port: u16,
+    pub(crate) base_path: String,
     pub(crate) db_connection: String,
     pub(crate) frontend_url: Url,
     pub(crate) email: EmailConfig,
@@ -54,6 +56,7 @@ struct ConfigFile {
 struct ServerConfigFile {
     address: Option<String>,
     port: Option<u16>,
+    base_path: Option<String>,
     db_connection: String,
     frontend_url: String,
 }
@@ -86,6 +89,7 @@ impl ServerConfig {
         path: &Path,
         address_override: Option<String>,
         port_override: Option<u16>,
+        base_path_override: Option<String>,
     ) -> Result<Self, String> {
         let contents = fs::read_to_string(path)
             .map_err(|error| format!("failed to read config `{}`: {error}", path.display()))?;
@@ -105,8 +109,19 @@ impl ServerConfig {
             return Err("email.RESEND_API_KEY cannot be empty".to_owned());
         }
 
-        let frontend_url = parse_web_url("frontend-url", &file.server.frontend_url)?;
-        let callback_url = parse_web_url("github.callback_url", &file.github.callback_url)?;
+        let base_path = normalize_base_path(
+            base_path_override
+                .or(file.server.base_path)
+                .as_deref()
+                .unwrap_or(DEFAULT_BASE_PATH),
+        )?;
+        let mut frontend_url = parse_web_url("frontend-url", &file.server.frontend_url)?;
+        frontend_url.set_path(&base_href(&base_path));
+        let mut callback_url = parse_web_url("github.callback_url", &file.github.callback_url)?;
+        if !callback_url.path().ends_with("/github/callback") {
+            return Err("github.callback_url must end with /github/callback".to_owned());
+        }
+        callback_url.set_path(&prefixed_route(&base_path, "/github/callback"));
         let private_key_path = resolve_relative_path(path, &file.github.private_key_path);
 
         if file.github.app_id == 0 {
@@ -127,6 +142,7 @@ impl ServerConfig {
         Ok(Self {
             address,
             port: port_override.or(file.server.port).unwrap_or(DEFAULT_PORT),
+            base_path,
             db_connection: file.server.db_connection,
             frontend_url,
             email: EmailConfig {
@@ -144,6 +160,54 @@ impl ServerConfig {
             },
         })
     }
+}
+
+pub(crate) fn prefixed_route(base_path: &str, route: &str) -> String {
+    if base_path == "/" {
+        format!("/{}", route.trim_start_matches('/'))
+    } else {
+        format!("{}/{}", base_path, route.trim_start_matches('/'))
+    }
+}
+
+pub(crate) fn base_href(base_path: &str) -> String {
+    if base_path == "/" {
+        "/".to_owned()
+    } else {
+        format!("{base_path}/")
+    }
+}
+
+fn normalize_base_path(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("base-path cannot be empty".to_owned());
+    }
+    if !value.starts_with('/') {
+        return Err("base-path must start with /".to_owned());
+    }
+    if value.contains(['?', '#', '\\']) || value.chars().any(char::is_control) {
+        return Err("base-path must be a plain URL path without query or fragment".to_owned());
+    }
+    if value.contains(['{', '}']) {
+        return Err("base-path cannot contain Actix route pattern characters".to_owned());
+    }
+    if value == "/" {
+        return Ok(DEFAULT_BASE_PATH.to_owned());
+    }
+
+    let trimmed = value.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("base-path cannot contain only repeated slashes".to_owned());
+    }
+    if trimmed
+        .split('/')
+        .skip(1)
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err("base-path cannot contain empty, . or .. segments".to_owned());
+    }
+    Ok(trimmed.to_owned())
 }
 
 fn parse_web_url(field: &str, value: &str) -> Result<Url, String> {
@@ -181,7 +245,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_address_and_port_override_file_values() {
+    fn cli_server_values_override_file_values() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("patchwork.toml");
         fs::write(
@@ -190,6 +254,7 @@ mod tests {
 [server]
 address = "127.0.0.1"
 port = 7000
+base-path = "/from-file"
 db-connection = "patchwork.sqlite"
 frontend-url = "http://localhost:3000"
 
@@ -209,16 +274,46 @@ process-session-hours = 24
         )
         .unwrap();
 
-        let config = ServerConfig::load(&path, Some("0.0.0.0".to_owned()), Some(8080)).unwrap();
+        let config = ServerConfig::load(
+            &path,
+            Some("0.0.0.0".to_owned()),
+            Some(8080),
+            Some("/registry/".to_owned()),
+        )
+        .unwrap();
+
+        let file_config = ServerConfig::load(&path, None, None, None).unwrap();
+        assert_eq!(file_config.base_path, "/from-file");
+        assert_eq!(file_config.address, "127.0.0.1");
+        assert_eq!(file_config.port, 7000);
 
         assert_eq!(config.address, "0.0.0.0");
         assert_eq!(config.port, 8080);
-        assert_eq!(config.frontend_url.as_str(), "http://localhost:3000/");
+        assert_eq!(config.base_path, "/registry");
+        assert_eq!(
+            config.frontend_url.as_str(),
+            "http://localhost:3000/registry/"
+        );
+        assert_eq!(
+            config.github.callback_url.as_str(),
+            "http://localhost:8080/registry/github/callback"
+        );
         assert_eq!(config.email.resend_api_key, "resend-key");
         assert_eq!(config.game_auth.process_session_hours, 24);
         assert_eq!(
             config.github.private_key_path,
             directory.path().join("./github-app.pem")
         );
+    }
+
+    #[test]
+    fn normalizes_and_validates_base_paths() {
+        assert_eq!(normalize_base_path("/").unwrap(), "/");
+        assert_eq!(normalize_base_path("/patchwork/").unwrap(), "/patchwork");
+        assert!(normalize_base_path("patchwork").is_err());
+        assert!(normalize_base_path("/patchwork//web").is_err());
+        assert!(normalize_base_path("/../patchwork").is_err());
+        assert!(normalize_base_path("//").is_err());
+        assert!(normalize_base_path("/{tenant}").is_err());
     }
 }

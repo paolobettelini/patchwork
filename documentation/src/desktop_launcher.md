@@ -178,8 +178,10 @@ than silently changing identity. See
 The configured Backend defaults to `http://127.0.0.1:8080` and is the single
 network origin for auth, GitHub, registry browsing, Upload, Profile, and
 published artifacts. Changing it signs out credentials issued by the previous
-server. Registries stores only a dynamic list of local folders in addition to
-this one URL; the old Remote database list has been removed.
+server. If the server uses a base path, include it in Backend, for example
+`https://mods.example.com/patchwork`. Registries stores only a dynamic list of
+local folders in addition to this one URL; the old Remote database list has
+been removed.
 
 ## Browse and profile installation
 

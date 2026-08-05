@@ -60,7 +60,9 @@ GitHub App installation token while fetching blobs concurrently.
 `settings.json` has one `backend` URL, defaulting to
 `http://127.0.0.1:8080`. Browse, account/OAuth, GitHub, Upload, Profile, and
 artifact requests all use this value. The former arbitrary Remote database
-list no longer exists.
+list no longer exists. When the web service is mounted below a base path, this
+setting includes it, for example `https://mods.example.com/patchwork`; desktop
+route and artifact resolution preserve that prefix.
 
 Changing Backend normalizes and persists the URL. If it differs from the
 previous server, the launcher clears the bearer token and cached profile:

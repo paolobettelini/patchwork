@@ -336,8 +336,8 @@ fn TopBar(
 
     view! {
         <header class="topbar">
-            <a class="brand" href="/" aria-label="Patchwork home">
-                <img class="brand-logo" src="/logo.png" alt="Patchwork" />
+            <a class="brand" href=app_url("/") aria-label="Patchwork home">
+                <img class="brand-logo" src=app_url("/logo.png") alt="Patchwork" />
                 <div class="brand-copy">
                     <strong>"Patchwork"</strong>
                 </div>
@@ -346,15 +346,15 @@ fn TopBar(
             <span class="topbar-divider" aria-hidden="true"></span>
 
             <nav class="top-tabs" aria-label="Main navigation">
-                <a class=top_tab_class(active_page == WebPage::Home) href="/">
+                <a class=top_tab_class(active_page == WebPage::Home) href=app_url("/")>
                     <HomeIcon />
                     <span>"Home"</span>
                 </a>
-                <a class=top_tab_class(active_page == WebPage::Browse) href="/browse">
+                <a class=top_tab_class(active_page == WebPage::Browse) href=app_url("/browse")>
                     <SearchIcon />
                     <span>"Browse"</span>
                 </a>
-                <a class=top_tab_class(active_page == WebPage::Upload) href="/upload">
+                <a class=top_tab_class(active_page == WebPage::Upload) href=app_url("/upload")>
                     <UploadIcon />
                     <span>"Upload"</span>
                 </a>
@@ -386,9 +386,10 @@ fn TopBar(
                         profile
                             .get()
                             .map(|profile| {
-                                let profile_href = profile_path(&profile.account.nickname);
+                                let internal_profile_path = profile_path(&profile.account.nickname);
                                 let own_profile_is_active = active_page == WebPage::Profile
-                                    && current_path() == profile_href;
+                                    && current_path() == internal_profile_path;
+                                let profile_href = app_url(&internal_profile_path);
                                 view! {
                                     <div class="profile-menu">
                                         <button
@@ -499,7 +500,7 @@ fn AuthDialog(
                 <button type="button" class="auth-close" aria-label="Close" on:click=move |_| set_show_auth.set(false)>
                     "×"
                 </button>
-                <img src="/logo.png" alt="Patchwork" />
+                <img src=app_url("/logo.png") alt="Patchwork" />
                 <h1>{move || if registration_challenge.get().is_some() {
                     "Check your inbox"
                 } else if mode.get() == AuthMode::Register {
@@ -749,7 +750,7 @@ fn WebProfilePage(
                         <p class="catalog-kicker">"Profile not found"</p>
                         <h1>"No publisher at this address"</h1>
                         <p>{error}</p>
-                        <a class="catalog-primary-action" href="/browse">
+                        <a class="catalog-primary-action" href=app_url("/browse")>
                             <SearchIcon />
                             <span>"Browse projects"</span>
                         </a>
@@ -931,7 +932,7 @@ fn GithubConnection(
                     .unwrap_or_else(|| view! {
                         <div class="github-connect-empty">
                             <p>"Connect the GitHub identity you will use to publish projects."</p>
-                            <a class="catalog-primary-action" href="/github/connect">
+                            <a class="catalog-primary-action" href=app_url("/github/connect")>
                                 <GithubIcon />
                                 <span>"Connect GitHub"</span>
                             </a>
@@ -976,11 +977,11 @@ fn HomePage() -> impl IntoView {
                     "A launcher, registry and composition tool for stitching many mods into one buildable project."
                 </p>
                 <div class="web-hero-actions">
-                    <a class="catalog-primary-action" href="/browse">
+                    <a class="catalog-primary-action" href=app_url("/browse")>
                         <SearchIcon />
                         <span>"Browse registry"</span>
                     </a>
-                    <a class="catalog-secondary-action" href="/upload">
+                    <a class="catalog-secondary-action" href=app_url("/upload")>
                         <UploadIcon />
                         <span>"Upload"</span>
                     </a>
@@ -988,7 +989,7 @@ fn HomePage() -> impl IntoView {
             </div>
 
             <div class="web-logo-panel" aria-hidden="true">
-                <img src="/logo.png" alt="" />
+                <img src=app_url("/logo.png") alt="" />
                 <div class="web-stitches">
                     <span></span>
                     <span></span>
@@ -1022,18 +1023,18 @@ fn NotFoundPage() -> impl IntoView {
         <section class="not-found-page">
             <div class="not-found-mark" aria-hidden="true">
                 <span>"4"</span>
-                <img src="/logo.png" alt="" />
+                <img src=app_url("/logo.png") alt="" />
                 <span>"4"</span>
             </div>
             <p class="catalog-kicker">"Loose thread"</p>
             <h1>"Page not found"</h1>
             <p>"This address is not part of the current Patchwork pattern."</p>
             <div class="not-found-actions">
-                <a class="catalog-primary-action" href="/">
+                <a class="catalog-primary-action" href=app_url("/")>
                     <HomeIcon />
                     <span>"Back home"</span>
                 </a>
-                <a class="catalog-secondary-action" href="/browse">
+                <a class="catalog-secondary-action" href=app_url("/browse")>
                     <SearchIcon />
                     <span>"Browse registry"</span>
                 </a>
@@ -1153,9 +1154,19 @@ fn theme_id_or_default(theme: &str) -> &'static str {
 fn current_path() -> String {
     #[cfg(target_arch = "wasm32")]
     {
-        web_sys::window()
+        let path = web_sys::window()
             .and_then(|window| window.location().pathname().ok())
-            .unwrap_or_else(|| "/".to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let base_path = configured_base_path();
+        if base_path == "/" {
+            path
+        } else if path == base_path {
+            "/".to_owned()
+        } else {
+            path.strip_prefix(&format!("{base_path}/"))
+                .map(|relative| format!("/{relative}"))
+                .unwrap_or(path)
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1198,15 +1209,53 @@ fn upload_path(request: &RegistryScanRequest) -> String {
 fn navigate_to(path: &str) {
     #[cfg(target_arch = "wasm32")]
     if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href(path);
+        let _ = window.location().set_href(&app_url(path));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     let _ = path;
 }
 
+fn app_url(path: &str) -> String {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(base_uri) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.base_uri().ok().flatten())
+        else {
+            return path.to_owned();
+        };
+        return url::Url::parse(&base_uri)
+            .and_then(|base| base.join(path.trim_start_matches('/')))
+            .map(|url| url.to_string())
+            .unwrap_or_else(|_| path.to_owned());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        path.to_owned()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn configured_base_path() -> String {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.base_uri().ok().flatten())
+        .and_then(|base_uri| url::Url::parse(&base_uri).ok())
+        .map(|url| {
+            let path = url.path().trim_end_matches('/');
+            if path.is_empty() {
+                "/".to_owned()
+            } else {
+                path.to_owned()
+            }
+        })
+        .unwrap_or_else(|| "/".to_owned())
+}
+
 async fn fetch_profile() -> Result<ProfileDto, String> {
-    let response = Request::get("/api/auth/me")
+    let response = Request::get(&app_url("/api/auth/me"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1220,7 +1269,7 @@ async fn fetch_profile() -> Result<ProfileDto, String> {
 }
 
 async fn fetch_public_profile(nickname: &str) -> Result<PublicProfileDto, String> {
-    let response = Request::get(&format!("/api/profiles/{nickname}"))
+    let response = Request::get(&app_url(&format!("/api/profiles/{nickname}")))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1235,10 +1284,10 @@ async fn fetch_registry_browse(
 ) -> Result<RegistryBrowseResponse, String> {
     let query: String =
         url::form_urlencoded::byte_serialize(input.query.trim().as_bytes()).collect();
-    let response = Request::get(&format!(
+    let response = Request::get(&app_url(&format!(
         "/registry/search?q={query}&mods={}&modpacks={}",
         input.include_mods, input.include_modpacks
-    ))
+    )))
     .send()
     .await
     .map_err(|error| error.to_string())?;
@@ -1248,11 +1297,11 @@ async fn fetch_registry_browse(
 async fn fetch_registry_project(
     project: &RegistryProjectRef,
 ) -> Result<RegistryProjectDetails, String> {
-    let response = Request::get(&format!(
+    let response = Request::get(&app_url(&format!(
         "/registry/projects/{}/{}",
         project.project_kind.route_segment(),
         project.project_id
-    ))
+    )))
     .send()
     .await
     .map_err(|error| error.to_string())?;
@@ -1301,7 +1350,7 @@ async fn fetch_scan_project_details(
 }
 
 async fn start_registry_scan(input: RegistryScanRequest) -> Result<RegistryScanJobStarted, String> {
-    let response = Request::post("/registry/scan-jobs")
+    let response = Request::post(&app_url("/registry/scan-jobs"))
         .json(&input)
         .map_err(|error| error.to_string())?
         .send()
@@ -1311,7 +1360,7 @@ async fn start_registry_scan(input: RegistryScanRequest) -> Result<RegistryScanJ
 }
 
 async fn fetch_registry_scan_progress(job_id: &str) -> Result<RegistryScanProgress, String> {
-    let response = Request::get(&format!("/registry/scan-jobs/{job_id}"))
+    let response = Request::get(&app_url(&format!("/registry/scan-jobs/{job_id}")))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1347,7 +1396,7 @@ async fn poll_registry_scan(
 }
 
 async fn fetch_registry_scan(scan_id: &str) -> Result<RegistryScan, String> {
-    let response = Request::get(&format!("/registry/scans/{scan_id}"))
+    let response = Request::get(&app_url(&format!("/registry/scans/{scan_id}")))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1358,7 +1407,7 @@ async fn publish_registry_scan(
     scan_id: &str,
     input: RegistryPublishRequest,
 ) -> Result<RegistryPublishResponse, String> {
-    let response = Request::post(&format!("/registry/scans/{scan_id}/publish"))
+    let response = Request::post(&app_url(&format!("/registry/scans/{scan_id}/publish")))
         .json(&input)
         .map_err(|error| error.to_string())?
         .send()
@@ -1385,7 +1434,7 @@ async fn login_with_password(identifier: String, password: String) -> Result<Pro
     if identifier.is_empty() {
         return Err("Email or username is required.".to_string());
     }
-    let response = Request::post("/api/auth/login")
+    let response = Request::post(&app_url("/api/auth/login"))
         .json(&LoginRequest {
             identifier,
             password_sha256: password_sha256(&password)?,
@@ -1410,7 +1459,7 @@ async fn register_with_password(
         return Err("Password does not meet the security requirements.".to_string());
     }
 
-    let response = Request::post("/api/auth/register")
+    let response = Request::post(&app_url("/api/auth/register"))
         .json(&RegisterRequest {
             email,
             nickname,
@@ -1427,7 +1476,7 @@ async fn verify_registration_code(
     verification_id: String,
     code: String,
 ) -> Result<ProfileDto, String> {
-    let response = Request::post("/api/auth/register/verify")
+    let response = Request::post(&app_url("/api/auth/register/verify"))
         .json(&VerifyRegistrationRequest {
             verification_id,
             code,
@@ -1440,7 +1489,7 @@ async fn verify_registration_code(
 }
 
 async fn update_nickname(nickname: String) -> Result<ProfileDto, String> {
-    let response = Request::post("/api/account/nickname")
+    let response = Request::post(&app_url("/api/account/nickname"))
         .json(&UpdateNicknameRequest { nickname })
         .map_err(|error| error.to_string())?
         .send()
@@ -1450,7 +1499,7 @@ async fn update_nickname(nickname: String) -> Result<ProfileDto, String> {
 }
 
 async fn logout_site() -> Result<(), String> {
-    let response = Request::post("/api/auth/logout")
+    let response = Request::post(&app_url("/api/auth/logout"))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -1465,7 +1514,7 @@ async fn logout_site() -> Result<(), String> {
 }
 
 async fn disconnect_github() -> Result<(), String> {
-    let response = Request::delete("/github/account")
+    let response = Request::delete(&app_url("/github/account"))
         .send()
         .await
         .map_err(|error| error.to_string())?;

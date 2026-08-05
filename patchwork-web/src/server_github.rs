@@ -115,7 +115,7 @@ async fn callback(
 ) -> Result<HttpResponse> {
     let Some(oauth_state) = query.state.as_deref().filter(|value| !value.is_empty()) else {
         if query.code.is_some() || query.installation_id.is_some() || query.setup_action.is_some() {
-            return Ok(installation_complete_response());
+            return Ok(installation_complete_response(&state.frontend_url));
         }
         return Err(error::ErrorBadRequest("missing GitHub OAuth state"));
     };
@@ -157,11 +157,11 @@ async fn callback(
     }
 }
 
-async fn installation_complete() -> HttpResponse {
-    installation_complete_response()
+async fn installation_complete(state: web::Data<GithubState>) -> HttpResponse {
+    installation_complete_response(&state.frontend_url)
 }
 
-fn installation_complete_response() -> HttpResponse {
+fn installation_complete_response(frontend_url: &Url) -> HttpResponse {
     const PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -187,7 +187,7 @@ fn installation_complete_response() -> HttpResponse {
     <div class="mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
     <h1>GitHub App installed</h1>
     <p>The installation is complete. You can now scan repositories on Patchwork. Patchwork will verify repository access and your write permission during the scan.</p>
-    <a href="/">Return to Patchwork</a>
+    <a href="__PATCHWORK_HOME__">Return to Patchwork</a>
   </main>
 </body>
 </html>"#;
@@ -195,7 +195,7 @@ fn installation_complete_response() -> HttpResponse {
     HttpResponse::Ok()
         .insert_header((CACHE_CONTROL, "no-store"))
         .content_type("text/html; charset=utf-8")
-        .body(PAGE)
+        .body(PAGE.replace("__PATCHWORK_HOME__", frontend_url.as_str()))
 }
 
 async fn account(state: web::Data<GithubState>, request: HttpRequest) -> Result<HttpResponse> {

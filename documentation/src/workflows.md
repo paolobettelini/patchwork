@@ -190,10 +190,12 @@ Override only the bind socket when needed:
 cargo run --features server -- \
   --config patchwork.toml \
   --address 127.0.0.1 \
-  --port 3000
+  --port 3000 \
+  --base-path /patchwork
 ```
 
-The database connection still comes only from the TOML file. Set
+Address, port, and base path override their TOML values. The database
+connection still comes only from the TOML file. Set
 `--secure-cookies true` when the public site is served over HTTPS.
 
 ## Inspect the local database

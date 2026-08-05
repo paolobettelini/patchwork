@@ -36,6 +36,8 @@ pub(crate) struct AuthState {
     database: Database,
     email: crate::email::EmailSender,
     secure_cookies: bool,
+    base_path: String,
+    base_href: String,
 }
 
 impl AuthState {
@@ -43,11 +45,15 @@ impl AuthState {
         database: Database,
         email: crate::email::EmailSender,
         secure_cookies: bool,
+        base_path: String,
     ) -> Self {
+        let base_href = crate::config::base_href(&base_path);
         Self {
             database,
             email,
             secure_cookies,
+            base_path,
+            base_href,
         }
     }
 
@@ -99,7 +105,11 @@ async fn verify_registration(
     let profile = profile_for_account(&state.database, &account)?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(&session_token, state.secure_cookies))
+        .cookie(session_cookie(
+            &session_token,
+            state.secure_cookies,
+            &state.base_path,
+        ))
         .json(profile))
 }
 
@@ -110,7 +120,11 @@ async fn login(state: web::Data<AuthState>, body: web::Json<LoginRequest>) -> Re
     let profile = profile_for_account(&state.database, &account)?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(&session_token, state.secure_cookies))
+        .cookie(session_cookie(
+            &session_token,
+            state.secure_cookies,
+            &state.base_path,
+        ))
         .json(profile))
 }
 
@@ -164,7 +178,7 @@ async fn logout(state: web::Data<AuthState>, request: HttpRequest) -> Result<Htt
     }
 
     Ok(HttpResponse::Ok()
-        .cookie(clear_session_cookie(state.secure_cookies))
+        .cookie(clear_session_cookie(state.secure_cookies, &state.base_path))
         .finish())
 }
 
@@ -188,12 +202,12 @@ async fn oauth_authorize(
     if let Some(account) = authenticated_account(&state.database, &request)? {
         return Ok(HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
-            .body(authorize_consent_html(&query, &account)));
+            .body(authorize_consent_html(&query, &account, &state.base_href)));
     }
 
     Ok(HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
-        .body(authorize_login_html(&query)))
+        .body(authorize_login_html(&query, &state.base_href)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -308,9 +322,13 @@ async fn oauth_login(
     let session_token = create_web_session(&state, &account)?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(&session_token, state.secure_cookies))
+        .cookie(session_cookie(
+            &session_token,
+            state.secure_cookies,
+            &state.base_path,
+        ))
         .content_type("text/html; charset=utf-8")
-        .body(authorize_consent_html(&query, &account)))
+        .body(authorize_consent_html(&query, &account, &state.base_href)))
 }
 
 async fn oauth_register(
@@ -337,6 +355,7 @@ async fn oauth_register(
             &challenge.verification_id,
             &challenge.email,
             None,
+            &state.base_href,
         )))
 }
 
@@ -358,6 +377,7 @@ async fn oauth_verify_registration(
                     &form.verification_id,
                     &form.email,
                     Some(&message),
+                    &state.base_href,
                 )));
         }
         Err(error) => return Err(error.into_actix()),
@@ -365,9 +385,13 @@ async fn oauth_verify_registration(
     let session_token = create_web_session(&state, &account)?;
 
     Ok(HttpResponse::Ok()
-        .cookie(session_cookie(&session_token, state.secure_cookies))
+        .cookie(session_cookie(
+            &session_token,
+            state.secure_cookies,
+            &state.base_path,
+        ))
         .content_type("text/html; charset=utf-8")
-        .body(authorize_consent_html(&query, &account)))
+        .body(authorize_consent_html(&query, &account, &state.base_href)))
 }
 
 async fn oauth_consent(
@@ -861,9 +885,9 @@ fn bearer_token(request: &HttpRequest) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
-fn session_cookie(token: &str, secure: bool) -> Cookie<'static> {
+fn session_cookie(token: &str, secure: bool, base_path: &str) -> Cookie<'static> {
     Cookie::build(WEB_SESSION_COOKIE, token.to_owned())
-        .path("/")
+        .path(base_path.to_owned())
         .http_only(true)
         .same_site(SameSite::Lax)
         .secure(secure)
@@ -871,9 +895,9 @@ fn session_cookie(token: &str, secure: bool) -> Cookie<'static> {
         .finish()
 }
 
-fn clear_session_cookie(secure: bool) -> Cookie<'static> {
+fn clear_session_cookie(secure: bool, base_path: &str) -> Cookie<'static> {
     Cookie::build(WEB_SESSION_COOKIE, "")
-        .path("/")
+        .path(base_path.to_owned())
         .http_only(true)
         .same_site(SameSite::Lax)
         .secure(secure)
@@ -902,7 +926,7 @@ fn pkce_s256(verifier: &str) -> String {
     general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn authorize_login_html(query: &AuthorizeQuery) -> String {
+fn authorize_login_html(query: &AuthorizeQuery, base_href: &str) -> String {
     let oauth_fields = hidden_oauth_fields(query);
     format!(
         r#"<!doctype html>
@@ -910,14 +934,15 @@ fn authorize_login_html(query: &AuthorizeQuery) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="{base_href}">
   <title>Sign in to Patchwork</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main class="oauth-page">
     <section class="oauth-auth-stack">
-      <form class="auth-card" method="post" action="/oauth/register" data-password-form data-register-form data-auth-panel="register">
-        <img src="/logo.png" alt="Patchwork">
+      <form class="auth-card" method="post" action="oauth/register" data-password-form data-register-form data-auth-panel="register">
+        <img src="logo.png" alt="Patchwork">
         <h1>Create account</h1>
         <p>Use a stable UUID-backed publisher account.</p>
         <label>
@@ -952,8 +977,8 @@ fn authorize_login_html(query: &AuthorizeQuery) -> String {
         </button>
       </form>
 
-      <form class="auth-card" method="post" action="/oauth/login" data-password-form data-auth-panel="login" hidden>
-        <img src="/logo.png" alt="Patchwork">
+      <form class="auth-card" method="post" action="oauth/login" data-password-form data-auth-panel="login" hidden>
+        <img src="logo.png" alt="Patchwork">
         <h1>Sign in</h1>
         <p>Continue to Patchwork Desktop with an existing account.</p>
         <label>
@@ -977,24 +1002,26 @@ fn authorize_login_html(query: &AuthorizeQuery) -> String {
 </body>
 </html>"#,
         oauth_fields = oauth_fields,
+        base_href = escape_attr(base_href),
         password_hash_script = password_hash_script(),
     )
 }
 
-fn authorize_consent_html(query: &AuthorizeQuery, account: &Account) -> String {
+fn authorize_consent_html(query: &AuthorizeQuery, account: &Account, base_href: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="{base_href}">
   <title>Authorize Patchwork Desktop</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main class="oauth-page">
-    <form class="auth-card oauth-consent-card" method="post" action="/oauth/consent">
-      <img src="/logo.png" alt="Patchwork">
+    <form class="auth-card oauth-consent-card" method="post" action="oauth/consent">
+      <img src="logo.png" alt="Patchwork">
       <p class="catalog-kicker">Patchwork login complete</p>
       <h1>Authorize desktop app</h1>
       <p>You are signed in as <strong>{nickname}</strong>. Continue only if you started this login from Patchwork Desktop.</p>
@@ -1012,6 +1039,7 @@ fn authorize_consent_html(query: &AuthorizeQuery, account: &Account) -> String {
         email = escape_text(&account.email),
         uuid = escape_text(&account.uuid),
         fields = hidden_oauth_fields(query),
+        base_href = escape_attr(base_href),
     )
 }
 
@@ -1020,6 +1048,7 @@ fn authorize_verification_html(
     verification_id: &str,
     email: &str,
     message: Option<&str>,
+    base_href: &str,
 ) -> String {
     let error_message = message
         .map(|message| format!(r#"<p class="auth-error">{}</p>"#, escape_text(message)))
@@ -1030,13 +1059,14 @@ fn authorize_verification_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <base href="{base_href}">
   <title>Verify your Patchwork email</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <main class="oauth-page">
-    <form class="auth-card oauth-verification-card" method="post" action="/oauth/register/verify">
-      <img src="/logo.png" alt="Patchwork">
+    <form class="auth-card oauth-verification-card" method="post" action="oauth/register/verify">
+      <img src="logo.png" alt="Patchwork">
       <p class="catalog-kicker">Email verification</p>
       <h1>Check your inbox</h1>
       <p>We sent a six-digit code to <strong>{email}</strong>. It expires in {expires_in} minutes.</p>
@@ -1058,6 +1088,7 @@ fn authorize_verification_html(
         verification_id = escape_attr(verification_id),
         expires_in = EMAIL_CODE_MINUTES,
         fields = hidden_oauth_fields(query),
+        base_href = escape_attr(base_href),
     )
 }
 

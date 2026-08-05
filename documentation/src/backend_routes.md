@@ -1,5 +1,13 @@
 # Backend routes
 
+Every route in this chapter is shown relative to the configured
+`server.base-path`, which defaults to `/`. When `base-path = "/patchwork"`, for
+example, `/api/auth/me` is exposed as `/patchwork/api/auth/me`, `/browse` as
+`/patchwork/browse`, and `/pkg/patchwork_web.js` as
+`/patchwork/pkg/patchwork_web.js`. The prefix applies uniformly to pages,
+assets, account and OAuth APIs, GitHub callbacks, registry APIs, and game-auth
+APIs. Requests outside the configured prefix return 404.
+
 The Actix backend serves JSON APIs, OAuth HTML/form endpoints, GitHub redirects,
 compiled Leptos assets, and the SPA entry point. Protected routes accept either
 the HttpOnly browser session cookie or a desktop bearer token unless stated

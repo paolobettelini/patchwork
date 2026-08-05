@@ -53,16 +53,22 @@ const MAX_PUBLISHED_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) struct RegistryState {
     database: Database,
     github: GithubClient,
+    base_path: String,
     jobs: Arc<Mutex<HashMap<Uuid, StoredScanJob>>>,
 }
 
 impl RegistryState {
-    pub(crate) fn new(database: Database, github: GithubClient) -> Self {
+    pub(crate) fn new(database: Database, github: GithubClient, base_path: String) -> Self {
         Self {
             database,
             github,
+            base_path,
             jobs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn route(&self, route: &str) -> String {
+        crate::config::prefixed_route(&self.base_path, route)
     }
 
     fn start_job(&self, publisher_uuid: Uuid) -> (ScanReporter, RegistryScanJobStarted) {
@@ -232,7 +238,7 @@ async fn search_registry(
                 .search_mods(&query.q, pagination)
                 .map_err(database_http_error)?
                 .into_iter()
-                .map(browse_mod_dto),
+                .map(|project| browse_mod_dto(project, &state)),
         );
     }
     if query.modpacks.unwrap_or(true) {
@@ -242,7 +248,7 @@ async fn search_registry(
                 .search_modpacks(&query.q, pagination)
                 .map_err(database_http_error)?
                 .into_iter()
-                .map(browse_modpack_dto),
+                .map(|project| browse_modpack_dto(project, &state)),
         );
     }
     projects.retain(|project| {
@@ -262,7 +268,7 @@ async fn search_registry(
     }))
 }
 
-fn browse_mod_dto(project: PublishedMod) -> RegistryBrowseProject {
+fn browse_mod_dto(project: PublishedMod, state: &RegistryState) -> RegistryBrowseProject {
     browse_project_dto(
         RegistryProjectKind::Mod,
         project.id,
@@ -277,10 +283,11 @@ fn browse_mod_dto(project: PublishedMod) -> RegistryBrowseProject {
         project.manifest_sha256,
         project.readme_path.is_some(),
         project.image_path.is_some(),
+        state,
     )
 }
 
-fn browse_modpack_dto(project: PublishedModpack) -> RegistryBrowseProject {
+fn browse_modpack_dto(project: PublishedModpack, state: &RegistryState) -> RegistryBrowseProject {
     browse_project_dto(
         RegistryProjectKind::Modpack,
         project.id,
@@ -295,6 +302,7 @@ fn browse_modpack_dto(project: PublishedModpack) -> RegistryBrowseProject {
         project.manifest_sha256,
         project.readme_path.is_some(),
         project.image_path.is_some(),
+        state,
     )
 }
 
@@ -313,11 +321,12 @@ fn browse_project_dto(
     manifest_sha256: String,
     has_readme: bool,
     has_image: bool,
+    state: &RegistryState,
 ) -> RegistryBrowseProject {
-    let route = format!(
+    let route = state.route(&format!(
         "/registry/projects/{}/{project_id}",
         project_kind.route_segment()
-    );
+    ));
     let source_label = Url::parse(&repository_url)
         .ok()
         .and_then(|url| {
@@ -842,15 +851,19 @@ async fn get_project_details(
         return Err(error::ErrorNotFound("published project was not found"));
     }
     let details = match project_kind.as_str() {
-        "mods" => mod_details(&state.database, &project_id)?,
-        "modpacks" => modpack_details(&state.database, &project_id)?,
+        "mods" => mod_details(&state, &project_id)?,
+        "modpacks" => modpack_details(&state, &project_id)?,
         _ => None,
     }
     .ok_or_else(|| error::ErrorNotFound("published project was not found"))?;
     Ok(HttpResponse::Ok().json(details))
 }
 
-fn mod_details(database: &Database, project_id: &str) -> Result<Option<RegistryProjectDetails>> {
+fn mod_details(
+    registry: &RegistryState,
+    project_id: &str,
+) -> Result<Option<RegistryProjectDetails>> {
+    let database = &registry.database;
     let Some(state) = database
         .get_registry_mod_state(project_id)
         .map_err(database_http_error)?
@@ -889,7 +902,7 @@ fn mod_details(database: &Database, project_id: &str) -> Result<Option<RegistryP
             provided_api,
         )?);
     }
-    let route = format!("/registry/projects/mods/{}", state.mod_record.id);
+    let route = registry.route(&format!("/registry/projects/mods/{}", state.mod_record.id));
     Ok(Some(RegistryProjectDetails {
         project_kind: RegistryProjectKind::Mod,
         project_id: state.mod_record.id,
@@ -923,9 +936,10 @@ fn mod_details(database: &Database, project_id: &str) -> Result<Option<RegistryP
 }
 
 fn modpack_details(
-    database: &Database,
+    registry: &RegistryState,
     project_id: &str,
 ) -> Result<Option<RegistryProjectDetails>> {
+    let database = &registry.database;
     let Some(state) = database
         .get_registry_modpack_state(project_id)
         .map_err(database_http_error)?
@@ -954,7 +968,10 @@ fn modpack_details(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let route = format!("/registry/projects/modpacks/{}", state.modpack_record.id);
+    let route = registry.route(&format!(
+        "/registry/projects/modpacks/{}",
+        state.modpack_record.id
+    ));
     Ok(Some(RegistryProjectDetails {
         project_kind: RegistryProjectKind::Modpack,
         project_id: state.modpack_record.id,

@@ -656,9 +656,7 @@ fn authorize_url(
     code_challenge: &str,
     state: &str,
 ) -> Result<String, String> {
-    let mut url = Url::parse(server_url)
-        .map_err(|error| error.to_string())?
-        .join("/oauth/authorize")
+    let mut url = Url::parse(&endpoint_url(server_url, "/oauth/authorize")?)
         .map_err(|error| error.to_string())?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -671,11 +669,24 @@ fn authorize_url(
 }
 
 pub(crate) fn endpoint_url(server_url: &str, path: &str) -> Result<String, String> {
-    Ok(Url::parse(server_url)
-        .map_err(|error| error.to_string())?
-        .join(path)
-        .map_err(|error| error.to_string())?
-        .to_string())
+    let mut base = Url::parse(server_url).map_err(|error| error.to_string())?;
+    let configured_path = base.path().trim_end_matches('/').to_owned();
+    let requested_path = format!("/{}", path.trim_start_matches('/'));
+    if !configured_path.is_empty()
+        && (requested_path == configured_path
+            || requested_path.starts_with(&format!("{configured_path}/")))
+    {
+        base.set_path(&requested_path);
+        base.set_query(None);
+        base.set_fragment(None);
+        return Ok(base.to_string());
+    }
+
+    let base_path = format!("{}/", configured_path.trim_end_matches('/'));
+    base.set_path(&base_path);
+    base.join(requested_path.trim_start_matches('/'))
+        .map(|url| url.to_string())
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn normalize_server_url(value: &str) -> Result<String, String> {
@@ -700,4 +711,29 @@ fn pkce_s256(verifier: &str) -> String {
 
 fn emit_auth_event(app: &AppHandle, status: LauncherAuthStatus, error: Option<String>) {
     let _ = app.emit(PATCHWORK_AUTH_EVENT, PatchworkAuthEvent { status, error });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_url;
+
+    #[test]
+    fn backend_routes_preserve_the_configured_base_path() {
+        assert_eq!(
+            endpoint_url("https://example.com", "/api/profile").unwrap(),
+            "https://example.com/api/profile"
+        );
+        assert_eq!(
+            endpoint_url("https://example.com/patchwork", "/api/profile").unwrap(),
+            "https://example.com/patchwork/api/profile"
+        );
+        assert_eq!(
+            endpoint_url(
+                "https://example.com/patchwork",
+                "/patchwork/registry/projects/mods/demo"
+            )
+            .unwrap(),
+            "https://example.com/patchwork/registry/projects/mods/demo"
+        );
+    }
 }

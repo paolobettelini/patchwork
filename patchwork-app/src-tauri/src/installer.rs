@@ -20,6 +20,7 @@ use serde::de::DeserializeOwned;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
+    auth::endpoint_url,
     ensure_settings_dirs,
     model::{
         AppState, LauncherSettings, PATCHWORK_DOWNLOAD_EVENT, RegistryDownloadEvent,
@@ -1096,14 +1097,6 @@ fn absolutize_details(details: &mut RegistryProjectDetails, backend: &str) -> Re
         }
     }
     Ok(())
-}
-
-fn endpoint_url(server_url: &str, path: &str) -> Result<String, String> {
-    let mut url = url::Url::parse(server_url.trim()).map_err(|error| error.to_string())?;
-    url.set_path(path);
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url.to_string())
 }
 
 fn parse_json_response<T: DeserializeOwned>(

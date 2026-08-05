@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 
-use actix_web::{HttpRequest, HttpResponse, Result, http::Method, web};
+use actix_web::{
+    HttpRequest, HttpResponse, Result,
+    http::{Method, header},
+    web,
+};
 
 #[cfg(debug_assertions)]
 use actix_files::NamedFile;
-#[cfg(not(debug_assertions))]
-use actix_web::http::header;
 #[cfg(not(debug_assertions))]
 use rust_embed::RustEmbed;
 #[cfg(not(debug_assertions))]
@@ -14,11 +16,14 @@ use std::borrow::Cow;
 use std::io;
 
 const INDEX_FILE: &str = "index.html";
+const INDEX_BASE_HREF_PLACEHOLDER: &str = "__PATCHWORK_BASE_HREF__";
 
 #[derive(Clone)]
 pub(crate) struct FrontendAssets {
     #[cfg(debug_assertions)]
     root: PathBuf,
+    base_path: String,
+    base_href: String,
 }
 
 #[cfg(not(debug_assertions))]
@@ -31,13 +36,22 @@ const EMBEDDED_INDEX: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
 
 impl FrontendAssets {
     #[cfg(debug_assertions)]
-    pub(crate) fn new(root: PathBuf) -> Self {
-        Self { root }
+    pub(crate) fn new(root: PathBuf, base_path: String) -> Self {
+        let base_href = crate::config::base_href(&base_path);
+        Self {
+            root,
+            base_path,
+            base_href,
+        }
     }
 
     #[cfg(not(debug_assertions))]
-    pub(crate) fn new(_root: PathBuf) -> Self {
-        Self {}
+    pub(crate) fn new(_root: PathBuf, base_path: String) -> Self {
+        let base_href = crate::config::base_href(&base_path);
+        Self {
+            base_path,
+            base_href,
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -48,6 +62,14 @@ impl FrontendAssets {
         } else {
             dist_path
         };
+        if path == INDEX_FILE {
+            let data = match std::fs::read(file_path) {
+                Ok(data) => data,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            return Ok(Some(self.index_response(data, request)));
+        }
         let file = match NamedFile::open_async(file_path).await {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -69,6 +91,9 @@ impl FrontendAssets {
             };
             file.data
         };
+        if path == INDEX_FILE {
+            return Ok(Some(self.index_response(data.into_owned(), request)));
+        }
         let length = data.len();
         let mut response = HttpResponse::Ok();
         response.insert_header((header::CONTENT_TYPE, content_type(path).to_string()));
@@ -78,6 +103,31 @@ impl FrontendAssets {
         } else {
             Ok(Some(response.body(data.into_owned())))
         }
+    }
+
+    fn index_response(&self, data: Vec<u8>, request: &HttpRequest) -> HttpResponse {
+        let source = String::from_utf8_lossy(&data);
+        let body = source
+            .replace(INDEX_BASE_HREF_PLACEHOLDER, &self.base_href)
+            .into_bytes();
+        let mut response = HttpResponse::Ok();
+        response.insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"));
+        response.insert_header((header::CONTENT_LENGTH, body.len()));
+        if request.method() == Method::HEAD {
+            response.finish()
+        } else {
+            response.body(body)
+        }
+    }
+
+    fn request_path<'a>(&self, path: &'a str) -> Option<&'a str> {
+        if self.base_path == "/" {
+            return path.strip_prefix('/');
+        }
+        if path == self.base_path {
+            return Some("");
+        }
+        path.strip_prefix(&self.base_path)?.strip_prefix('/')
     }
 }
 
@@ -95,7 +145,9 @@ pub(crate) async fn fallback(
         return Ok(not_found_response());
     }
 
-    let path = request.path().trim_start_matches('/');
+    let Some(path) = assets.request_path(request.path()) else {
+        return Ok(not_found_response());
+    };
     if path.is_empty() {
         return required_asset(&assets, INDEX_FILE, &request).await;
     }
@@ -139,6 +191,10 @@ async fn required_asset(
 }
 
 async fn not_found() -> HttpResponse {
+    not_found_response()
+}
+
+pub(crate) async fn outside_base_path() -> HttpResponse {
     not_found_response()
 }
 

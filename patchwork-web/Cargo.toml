@@ -44,7 +44,7 @@ tar = { version = "0.4", optional = true }
 url = { version = "2.5", optional = true }
 uuid = { version = "1.24", features = ["serde"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
-web-sys = { version = "0.3", features = ["HtmlInputElement", "Location", "Storage", "SubmitEvent", "Window"] }
+web-sys = { version = "0.3", features = ["Document", "HtmlInputElement", "Location", "Node", "Storage", "SubmitEvent", "Window"] }
 
 [features]
 default = ["server"]
