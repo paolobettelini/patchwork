@@ -7,6 +7,7 @@ frontend-url = "http://localhost:8080"
 
 [email]
 RESEND_API_KEY = "replace-with-resend-api-key"
+FROM_ADDRESS = "Patchwork <onboarding@resend.dev>"
 
 [github]
 app_id = 123456

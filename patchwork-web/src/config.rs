@@ -25,6 +25,7 @@ pub(crate) struct ServerConfig {
 #[derive(Clone)]
 pub(crate) struct EmailConfig {
     pub(crate) resend_api_key: String,
+    pub(crate) from_address: String,
 }
 
 #[derive(Clone)]
@@ -66,6 +67,8 @@ struct ServerConfigFile {
 struct EmailConfigFile {
     #[serde(rename = "RESEND_API_KEY")]
     resend_api_key: String,
+    #[serde(rename = "FROM_ADDRESS")]
+    from_address: String,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +111,9 @@ impl ServerConfig {
         if file.email.resend_api_key.trim().is_empty() {
             return Err("email.RESEND_API_KEY cannot be empty".to_owned());
         }
+        if file.email.from_address.trim().is_empty() {
+            return Err("email.FROM_ADDRESS cannot be empty".to_owned());
+        }
 
         let base_path = normalize_base_path(
             base_path_override
@@ -147,6 +153,7 @@ impl ServerConfig {
             frontend_url,
             email: EmailConfig {
                 resend_api_key: file.email.resend_api_key,
+                from_address: file.email.from_address,
             },
             github: GithubConfig {
                 app_id: file.github.app_id,
@@ -260,6 +267,7 @@ frontend-url = "http://localhost:3000"
 
 [email]
 RESEND_API_KEY = "resend-key"
+FROM_ADDRESS = "Patchwork <onboarding@resend.dev>"
 
 [github]
 app_id = 123456

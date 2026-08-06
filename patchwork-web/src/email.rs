@@ -3,17 +3,17 @@ use resend_rs::types::CreateEmailBaseOptions;
 
 use crate::config::EmailConfig;
 
-const FROM_ADDRESS: &str = "Patchwork <onboarding@resend.dev>";
-
 #[derive(Clone)]
 pub(crate) struct EmailSender {
     client: Resend,
+    from_address: String,
 }
 
 impl EmailSender {
     pub(crate) fn new(config: EmailConfig) -> Self {
         Self {
             client: Resend::new(&config.resend_api_key),
+            from_address: config.from_address,
         }
     }
 
@@ -28,10 +28,13 @@ impl EmailSender {
         let text = format!(
             "Hi {nickname},\n\nYour Patchwork verification code is {code}.\n\nIt expires in {expires_in_minutes} minutes. If you did not request this account, ignore this email."
         );
-        let email =
-            CreateEmailBaseOptions::new(FROM_ADDRESS, [recipient], "Verify your Patchwork account")
-                .with_html(&html)
-                .with_text(&text);
+        let email = CreateEmailBaseOptions::new(
+            self.from_address.as_str(),
+            [recipient],
+            "Verify your Patchwork account",
+        )
+        .with_html(&html)
+        .with_text(&text);
 
         self.client
             .emails
