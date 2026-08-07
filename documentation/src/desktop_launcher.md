@@ -10,10 +10,11 @@ desktop-only actions are passed in at the application boundary.
 
 ## Local data and settings
 
-The Linux default is:
+The default data root follows the platform local-data directory. Typical roots are
+`~/.local/share/patchwork/` on Linux and `%LOCALAPPDATA%\patchwork\` on Windows:
 
 ```text
-~/.local/share/patchwork/
+<local-data>/patchwork/
   config/
     settings-path.json
     settings.json
@@ -53,8 +54,9 @@ binary caches. The four red clear actions ask for confirmation and are rejected 
 a Patchwork task is active:
 
 - **Clear cargo cache** removes only `$CARGO_HOME/registry` and
-  `$CARGO_HOME/git`. It deliberately preserves Cargo binaries, credentials,
-  configuration, and the rest of Cargo home.
+  `$CARGO_HOME/git` (or the platform default Cargo home, including
+  `%USERPROFILE%\.cargo` on Windows). It deliberately preserves Cargo binaries,
+  credentials, configuration, and the rest of Cargo home.
 - **Clear target cache** removes and recreates the configured
   `cargoTargetDir`.
 - **Clear build cache** removes and recreates the configured `buildCache`.
@@ -74,19 +76,20 @@ the sibling `patchwork` directory is selected.
 
 Compose calls the Patchwork core and writes the generated project below the
 configured build cache. Build invokes `cargo build` with the configured
-`CARGO_TARGET_DIR`. After a successful build, Patchwork moves the executable to
-`binCache/<profile-id>/<debug|release>/<package-name>` and leaves an absolute
-symbolic link at Cargo's original target path. Copy-then-remove semantics are
-used so target and binary cache may reside on different filesystems.
+`CARGO_TARGET_DIR`. After a successful build, Patchwork atomically copies the
+executable to `binCache/<profile-id>/<debug|release>/<package-name>` while
+leaving Cargo's original executable in place. No executable or asset symbolic
+links are required, which also keeps normal Windows installations independent
+of Developer Mode or elevated symlink privileges.
 
 Run never invokes Cargo. It starts the cached executable directly in the PTY,
-using the executable's binary-cache directory as its working directory. That
-directory contains an `assets` symbolic link to the composed project's
-assembled `assets/` tree, so programs can use ordinary relative asset paths
-without depending on a particular game engine. Only the game process receives
-`BACKEND_ADDR`, whose value is the current **Backend** setting. Compose, codegen
-and Cargo Build do not receive this variable. The Stop command retains enough
-native process state to terminate either Cargo Build or the running game.
+but uses the composed `buildCache/<profile-id>` project as its working
+directory. Programs therefore see the assembled `assets/` tree through ordinary
+relative paths even though the executable itself lives in the binary cache.
+Only the game process receives `BACKEND_ADDR`, whose value is the current
+**Backend** setting. Compose, codegen and Cargo Build do not receive this
+variable. The Stop command retains enough native process state to terminate
+either Cargo Build or the running game.
 
 Every editable profile has an **Options** tab beside Details, Dependencies, and
 Console. It stores four per-profile collections directly in the profile TOML:
@@ -98,9 +101,13 @@ Console. It stores four per-profile collections directly in the profile TOML:
 
 The UI also displays launcher defaults as gray read-only rows. Build defaults
 include `TERM`, `COLORTERM`, `CARGO_TERM_COLOR`, `CARGO_TARGET_DIR`, `build`, and
-the selected mode's `--release`. Run defaults include `TERM`, `COLORTERM`, and
-`BACKEND_ADDR`; authenticated runs additionally reserve `PATCHWORK_AUTH_FD` and
-`PATCHWORK_AUTH_PIPE_VERSION`. A custom value cannot override these names.
+the selected mode's `--release`. Run defaults are compiled for the target:
+Unix shows `TERM`, `COLORTERM`, `BACKEND_ADDR`, `PATCHWORK_AUTH_FD=3`, and
+`PATCHWORK_AUTH_PIPE_VERSION=1`; Windows shows `TERM`, `COLORTERM`,
+`BACKEND_ADDR`, `PATCHWORK_AUTH_PIPE=\\.\pipe\patchwork-auth-<random>`, and
+`PATCHWORK_AUTH_PIPE_VERSION=1`. Only the corresponding target's auth variables
+are reserved, so a custom value cannot override launcher-managed bootstrap
+state.
 
 Arguments are represented as an array of command-line fragments. Each row is
 split using shell-style whitespace, quotes, and escapes, without invoking a
@@ -166,13 +173,15 @@ GitHub linking uses a separate short-lived loopback listener and is described
 in [GitHub integration](./github_integration.md).
 
 Before Run, a signed-in launcher requests a 60-second launch ticket using the
-desktop bearer token. It starts the game with a separate anonymous pipe on file
-descriptor `3`, advertises only that descriptor through `PATCHWORK_AUTH_FD`,
-and writes `u32` big-endian length plus the UTF-8 ticket. The ticket is never an
-argument, environment value, terminal message, or file. `BACKEND_ADDR` tells
-the executable where to consume it. Logged-out launches omit the pipe and
-remain anonymous; an authenticated ticket request failure aborts Run rather
-than silently changing identity. See
+desktop bearer token. Unix launches keep the anonymous pipe on file descriptor
+`3` advertised through `PATCHWORK_AUTH_FD`. Windows launches create a unique
+local named pipe under `\\.\pipe\` and advertise only its name through
+`PATCHWORK_AUTH_PIPE`; remote named-pipe clients are rejected. Both transports
+write the same `u32` big-endian length plus UTF-8 ticket frame. The ticket is
+never an argument, environment value, terminal message, or file. `BACKEND_ADDR`
+tells the executable where to consume it. Logged-out launches omit the auth
+transport and remain anonymous; an authenticated ticket request failure aborts
+Run rather than silently changing identity. See
 [Game authentication and server transfer](./game_authentication.md).
 
 The configured Backend defaults to `http://127.0.0.1:8080` and is the single
@@ -264,14 +273,34 @@ the launcher verifies its manifest and installs it atomically. Mutable default
 branches are used only to discover a new commit during Scan/Rescan, never for
 an existing published version.
 
-## Build scripts
+## Desktop development and installation
 
-- `scripts/dev-frontend.sh`: build the development CSR frontend and serve
-  `dist/` on port 1420, unless a server already responds there.
-- `scripts/build-frontend.sh`: build release frontend assets and copy
-  `index.html` into `dist/`.
-- `scripts/tauri-dev.sh`: run `cargo tauri dev` from the app directory.
-- `scripts/tauri-build-debug.sh`: create a debug native binary without a
-  platform bundle.
-- `scripts/install_arch.sh`: build a release binary and install the executable,
-  desktop entry, and icon system-wide on Arch Linux.
+The desktop app has no repository `.sh` wrappers. Project-owned desktop
+lifecycle commands are implemented by the dependency-free Rust helper in
+`tools/desktop-tool`, so the same entry points work from PowerShell, `cmd`, and
+Unix shells:
+
+```text
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- dev
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- build-debug
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- install
+```
+
+Tauri calls the same helper internally with `frontend-dev` and
+`frontend-build`; these commands run `cargo leptos`, prepare `dist/`, and serve
+the development frontend without `sh`, `cp`, `curl`, or Python.
+
+`install` is target-specific behind one command: on Windows it builds the NSIS
+bundle and launches the generated installer; on Linux it performs a release
+`--no-bundle` build and installs the binary, desktop file, and icon for the
+current user under `~/.local`. Linux can override that root with an absolute
+`PATCHWORK_INSTALL_PREFIX`. A Makefile is not required, avoiding an additional
+Windows toolchain dependency.
+
+Windows uses `src-tauri/tauri.windows.conf.json` to select NSIS by default and
+`public/logo.ico` for the native executable/installer icon.
+
+The regular-file binary cache and composed-project working directory are the
+only supported launcher layout. There is no migration or cleanup logic for the
+old symlink layout; clear old target and binary caches manually once when
+upgrading from such a build.

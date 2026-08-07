@@ -80,19 +80,7 @@ Patchwork projects.
 
 For a desktop development profile, a practical setup is:
 
-1. Replace the default mod and modpack cache directories with symbolic links to
-   the development checkout. For example, preserving the existing downloaded
-   caches as backups:
-
-   ```bash
-   PATCHWORK_DATA="${XDG_DATA_HOME:-$HOME/.local/share}/patchwork"
-
-   rm -rf "$PATCHWORK_DATA/cache/mods" && ln -s /some/local/mods "$PATCHWORK_DATA/cache"
-   rm -rf "$PATCHWORK_DATA/cache/modpacks" && ln -s /some/local/modpacks "$PATCHWORK_DATA/cache"
-   ```
-
-   The launcher's
-   cache clear actions intentionally refuse to delete symbolic-link targets.
+1. Set the mod and modpack caches to your local development mods/modpacks folder `/home/local/...`.
 2. Add `/some/local`, or the appropriate checkout root, to **Registries / Local
    folders** so Browse resolves development projects locally before the remote
    registry.

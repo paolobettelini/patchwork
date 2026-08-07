@@ -42,8 +42,8 @@ pub(crate) fn SettingsPage(
     set_selected_modpack: WriteSignal<usize>,
 ) -> impl IntoView {
     let (settings_tab, set_settings_tab) = signal(SettingsTab::General);
-    let (local_entries, set_local_entries) = signal(vec![DynamicEntry::empty(0)]);
-    let (_local_next_id, set_local_next_id) = signal(1_u32);
+    let (local_entries, set_local_entries) = signal(Vec::<DynamicEntry>::new());
+    let (_local_next_id, set_local_next_id) = signal(0_u32);
     let (local_entries_initialized, set_local_entries_initialized) = signal(false);
     let (cache_usage, set_cache_usage) = signal(LauncherCacheUsage::default());
     let (cache_pending, set_cache_pending) = signal(None::<String>);

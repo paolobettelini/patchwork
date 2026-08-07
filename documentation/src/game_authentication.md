@@ -102,7 +102,8 @@ Authorization: Bearer <desktop-app-token>
 }
 ```
 
-The launcher opens a separate anonymous pipe and starts the executable with:
+The launcher creates a one-shot local auth transport before starting the game.
+Unix uses an inherited anonymous pipe:
 
 ```text
 BACKEND_ADDR=https://patchwork.example.com
@@ -110,22 +111,34 @@ PATCHWORK_AUTH_FD=3
 PATCHWORK_AUTH_PIPE_VERSION=1
 ```
 
-`BACKEND_ADDR` is the configured Patchwork backend. `PATCHWORK_AUTH_FD` is only
-a descriptor number. The pipe contains exactly:
+Windows uses a unique local named pipe instead:
+
+```text
+BACKEND_ADDR=https://patchwork.example.com
+PATCHWORK_AUTH_PIPE=\\.\pipe\patchwork-auth-<pid>-<random>
+PATCHWORK_AUTH_PIPE_VERSION=1
+```
+
+`PATCHWORK_AUTH_FD` is only a descriptor number and `PATCHWORK_AUTH_PIPE` is
+only a local endpoint name; neither contains the credential. Windows clients
+open the named pipe for reading after process start. The launcher rejects remote
+named-pipe clients and waits up to ten seconds for the local game to connect.
+The Windows named-pipe transport described here is implemented by the desktop
+launcher; implementing the corresponding game-side reader is a separate step.
+Both transports contain exactly:
 
 ```text
 u32 big-endian byte length || UTF-8 launch-ticket bytes
 ```
 
 The write end is closed after this one message. The ticket is not placed in
-arguments, environment variables, terminal input/output, or a file. The pipe
-is separate from the console PTY, so stdin remains usable. The current Tauri
-implementation uses inherited Unix file descriptor `3`; another platform must
-provide equivalent one-shot anonymous-pipe semantics.
+arguments, environment variables, terminal input/output, or a file. The auth
+transport is separate from the console PTY, so stdin remains usable.
 
-When the launcher has no signed-in account it omits the descriptor and ticket,
-allowing an anonymous game launch. If an account exists but ticket issuance
-fails, the launcher aborts instead of silently downgrading identity.
+When the launcher has no signed-in account it omits the auth endpoint and
+ticket, allowing an anonymous game launch. If an account exists but ticket
+issuance or local delivery fails, the launcher aborts instead of silently
+downgrading identity.
 
 The game consumes the ticket without an app token:
 
@@ -479,7 +492,8 @@ Never fall back to a client-supplied UUID after an admission error.
 
 ## Client responsibilities
 
-- Read the optional launch ticket once and never log it.
+- Read the optional launch ticket once and never log it. On Unix read
+  `PATCHWORK_AUTH_FD`; on Windows open `PATCHWORK_AUTH_PIPE` for reading.
 - Exchange it for a process token and keep that token only in RAM.
 - Use an OS CSPRNG for every nonce and X25519 private key.
 - Reject all-zero X25519 shared secrets.

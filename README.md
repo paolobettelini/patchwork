@@ -57,12 +57,28 @@ The output is a regular Cargo project:
 cargo check --manifest-path build/client/Cargo.toml
 ```
 
-## Start the desktop app
+## Desktop app
+
+Desktop development and installation use the same Rust helper on Linux and
+Windows, with no repository shell wrappers:
 
 ```bash
 cd patchwork-app
-cargo tauri dev
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- dev
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- build-debug
 ```
+
+Install Patchwork with the same command on both supported desktop platforms:
+
+```bash
+cargo run --manifest-path tools/desktop-tool/Cargo.toml -- install
+```
+
+On Windows, `install` builds the NSIS package and launches its installer. On
+Linux, it installs the release build for the current user under `~/.local`; set
+`PATCHWORK_INSTALL_PREFIX` to another absolute prefix when needed. The usual
+Tauri system prerequisites plus the `wasm32-unknown-unknown` target,
+`cargo-leptos`, and the Tauri CLI must be installed first.
 
 ## Start the website
 

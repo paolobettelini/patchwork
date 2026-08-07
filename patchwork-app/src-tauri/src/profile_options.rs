@@ -137,13 +137,27 @@ fn default_profile_options(
         },
         run: patchwork::ProcessOptions {
             args: Vec::new(),
-            env: BTreeMap::from([
-                ("TERM".to_owned(), "xterm-256color".to_owned()),
-                ("COLORTERM".to_owned(), "truecolor".to_owned()),
-                ("BACKEND_ADDR".to_owned(), settings.backend.clone()),
-                ("PATCHWORK_AUTH_FD".to_owned(), "3".to_owned()),
-                ("PATCHWORK_AUTH_PIPE_VERSION".to_owned(), "1".to_owned()),
-            ]),
+            env: {
+                let mut env = BTreeMap::from([
+                    ("TERM".to_owned(), "xterm-256color".to_owned()),
+                    ("COLORTERM".to_owned(), "truecolor".to_owned()),
+                    ("BACKEND_ADDR".to_owned(), settings.backend.clone()),
+                ]);
+                #[cfg(unix)]
+                {
+                    env.insert("PATCHWORK_AUTH_FD".to_owned(), "3".to_owned());
+                    env.insert("PATCHWORK_AUTH_PIPE_VERSION".to_owned(), "1".to_owned());
+                }
+                #[cfg(windows)]
+                {
+                    env.insert(
+                        "PATCHWORK_AUTH_PIPE".to_owned(),
+                        r"\\.\pipe\patchwork-auth-<random>".to_owned(),
+                    );
+                    env.insert("PATCHWORK_AUTH_PIPE_VERSION".to_owned(), "1".to_owned());
+                }
+                env
+            },
         },
     }
 }
@@ -167,6 +181,39 @@ mod tests {
         let error = validate_profile_options(&options).unwrap_err();
 
         assert!(error.contains("managed by Patchwork"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_run_defaults_use_fd_auth_transport() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = LauncherSettings::default_for(temporary.path());
+        let defaults = default_profile_options(&settings, "debug");
+
+        assert_eq!(defaults.run.env.get("PATCHWORK_AUTH_FD"), Some(&"3".to_owned()));
+        assert_eq!(
+            defaults.run.env.get("PATCHWORK_AUTH_PIPE_VERSION"),
+            Some(&"1".to_owned())
+        );
+        assert!(!defaults.run.env.contains_key("PATCHWORK_AUTH_PIPE"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_run_defaults_use_named_pipe_auth_transport() {
+        let temporary = tempfile::tempdir().unwrap();
+        let settings = LauncherSettings::default_for(temporary.path());
+        let defaults = default_profile_options(&settings, "debug");
+
+        assert_eq!(
+            defaults.run.env.get("PATCHWORK_AUTH_PIPE"),
+            Some(&r"\\.\pipe\patchwork-auth-<random>".to_owned())
+        );
+        assert_eq!(
+            defaults.run.env.get("PATCHWORK_AUTH_PIPE_VERSION"),
+            Some(&"1".to_owned())
+        );
+        assert!(!defaults.run.env.contains_key("PATCHWORK_AUTH_FD"));
     }
 
     #[test]

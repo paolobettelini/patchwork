@@ -82,32 +82,44 @@ pub(crate) fn sanitize_build_mode(mode: &str) -> Result<String, String> {
 }
 
 pub(crate) fn expand_env_vars(value: &str) -> String {
-    let mut expanded = String::with_capacity(value.len());
+    expand_env_vars_with(value, |name| std::env::var(name).ok())
+}
+
+fn expand_env_vars_with(
+    value: &str,
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> String {
+    let mut dollar_expanded = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();
 
     while let Some(character) = chars.next() {
         if character != '$' {
-            expanded.push(character);
+            dollar_expanded.push(character);
             continue;
         }
 
         if chars.peek() == Some(&'{') {
             chars.next();
             let mut name = String::new();
+            let mut closed = false;
             for next in chars.by_ref() {
                 if next == '}' {
+                    closed = true;
                     break;
                 }
                 name.push(next);
             }
-            if name.is_empty() {
-                expanded.push_str("${}");
-            } else if let Ok(value) = std::env::var(&name) {
-                expanded.push_str(&value);
+            if !closed {
+                dollar_expanded.push_str("${");
+                dollar_expanded.push_str(&name);
+            } else if name.is_empty() {
+                dollar_expanded.push_str("${}");
+            } else if let Some(value) = lookup(&name) {
+                dollar_expanded.push_str(&value);
             } else {
-                expanded.push_str("${");
-                expanded.push_str(&name);
-                expanded.push('}');
+                dollar_expanded.push_str("${");
+                dollar_expanded.push_str(&name);
+                dollar_expanded.push('}');
             }
             continue;
         }
@@ -123,16 +135,77 @@ pub(crate) fn expand_env_vars(value: &str) -> String {
         }
 
         if name.is_empty() {
-            expanded.push('$');
-        } else if let Ok(value) = std::env::var(&name) {
-            expanded.push_str(&value);
+            dollar_expanded.push('$');
+        } else if let Some(value) = lookup(&name) {
+            dollar_expanded.push_str(&value);
         } else {
-            expanded.push('$');
-            expanded.push_str(&name);
+            dollar_expanded.push('$');
+            dollar_expanded.push_str(&name);
         }
     }
 
+    let mut expanded = String::with_capacity(dollar_expanded.len());
+    let mut remaining = dollar_expanded.as_str();
+    while let Some(open) = remaining.find('%') {
+        expanded.push_str(&remaining[..open]);
+        let after_open = &remaining[open + 1..];
+        let Some(close) = after_open.find('%') else {
+            expanded.push_str(&remaining[open..]);
+            remaining = "";
+            break;
+        };
+        let name = &after_open[..close];
+        let valid_name = !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if valid_name {
+            if let Some(value) = lookup(name) {
+                expanded.push_str(&value);
+            } else {
+                expanded.push('%');
+                expanded.push_str(name);
+                expanded.push('%');
+            }
+        } else {
+            expanded.push('%');
+            expanded.push_str(name);
+            expanded.push('%');
+        }
+        remaining = &after_open[close + 1..];
+    }
+    expanded.push_str(remaining);
     expanded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "HOME" => Some("/home/example".to_owned()),
+            "USER" => Some("example".to_owned()),
+            "USERPROFILE" => Some(r"C:\Users\example".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn expands_unix_and_windows_environment_syntax() {
+        assert_eq!(
+            expand_env_vars_with("$HOME/${USER}/%USERPROFILE%", lookup),
+            r"/home/example/example/C:\Users\example"
+        );
+    }
+
+    #[test]
+    fn preserves_unknown_or_unclosed_variables() {
+        assert_eq!(
+            expand_env_vars_with("$UNKNOWN/${UNKNOWN}/%UNKNOWN%/${UNCLOSED", lookup),
+            "$UNKNOWN/${UNKNOWN}/%UNKNOWN%/${UNCLOSED"
+        );
+    }
 }
 
 pub(crate) fn display_path(path: &Path) -> String {

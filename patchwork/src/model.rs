@@ -68,12 +68,25 @@ impl ProcessOptions {
     }
 }
 
-const BUILD_RESERVED_ENV: &[&str] = &["TERM", "COLORTERM", "CARGO_TERM_COLOR", "CARGO_TARGET_DIR"];
+const BUILD_RESERVED_ENV: &[&str] = &[
+    "TERM",
+    "COLORTERM",
+    "CARGO_TERM_COLOR",
+    "CARGO_TARGET_DIR",
+];
+
 const RUN_RESERVED_ENV: &[&str] = &[
     "TERM",
     "COLORTERM",
     "BACKEND_ADDR",
+
+    #[cfg(unix)]
     "PATCHWORK_AUTH_FD",
+
+    #[cfg(windows)]
+    "PATCHWORK_AUTH_PIPE",
+
+    #[cfg(any(unix, windows))]
     "PATCHWORK_AUTH_PIPE_VERSION",
 ];
 

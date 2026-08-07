@@ -19,6 +19,18 @@ use std::{
     os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Command, Stdio},
 };
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{
+        CloseHandle, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, GetLastError, HANDLE,
+        INVALID_HANDLE_VALUE,
+    },
+    Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_OUTBOUND, WriteFile},
+    System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, SetNamedPipeHandleState,
+    },
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod assets;
@@ -1271,10 +1283,28 @@ fn calculate_cache_usage(settings: &LauncherSettings) -> Result<LauncherCacheUsa
     })
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = env::var_os("HOMEDRIVE")?;
+                let path = env::var_os("HOMEPATH")?;
+                Some(PathBuf::from(drive).join(path))
+            })
+            .or_else(|| env::var_os("HOME").map(PathBuf::from))
+    }
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
 fn cargo_cache_paths() -> Result<[PathBuf; 2], String> {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .or_else(|| user_home_dir().map(|home| home.join(".cargo")))
         .ok_or_else(|| "Cannot determine Cargo home directory".to_owned())?;
     Ok([cargo_home.join("registry"), cargo_home.join("git")])
 }
@@ -1338,8 +1368,7 @@ fn validate_clearable_path(path: &Path) -> Result<(), String> {
     if resolved.parent().is_none() {
         return Err("Refusing to clear a filesystem root".to_owned());
     }
-    if env::var_os("HOME")
-        .map(PathBuf::from)
+    if user_home_dir()
         .and_then(|home| home.canonicalize().ok())
         .as_deref()
         .is_some_and(|home| home == resolved)
@@ -1792,25 +1821,6 @@ fn run_cargo_build(
         return false;
     }
 
-    let cargo_executable = cargo_executable_path(settings, profile_id, build_mode);
-    if fs::symlink_metadata(&cargo_executable)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        && !cargo_executable.is_file()
-        && let Err(error) = fs::remove_file(&cargo_executable)
-    {
-        emit_console_line(
-            app,
-            &tasks,
-            profile_id,
-            action,
-            &format!(
-                "[build] Failed to remove broken executable symlink '{}': {error}",
-                cargo_executable.display()
-            ),
-        );
-        return false;
-    }
-
     let mut command = CommandBuilder::new("cargo");
     command.arg("build");
     command.cwd(project_dir.as_os_str());
@@ -1909,17 +1919,6 @@ fn run_profile_executable(
         return false;
     }
 
-    if let Err(error) = sync_cached_assets_link(settings, profile_id, build_mode) {
-        emit_console_line(
-            app,
-            &tasks,
-            profile_id,
-            action,
-            &format!("[run] Failed to prepare assets: {error}"),
-        );
-        return false;
-    }
-
     let custom_arguments = match options.expanded_args() {
         Ok(arguments) => arguments,
         Err(error) => {
@@ -1933,14 +1932,24 @@ fn run_profile_executable(
             return false;
         }
     };
+    let working_dir = profile_working_dir(settings, profile_id);
+    if !working_dir.is_dir() {
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            &format!(
+                "[run] Failed: composed project not found at '{}'. Run Compose first.",
+                working_dir.display()
+            ),
+        );
+        return false;
+    }
     let mut command = CommandBuilder::new(executable.as_os_str());
     for argument in &custom_arguments {
         command.arg(argument);
     }
-    let working_dir = executable
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
     command.cwd(working_dir.as_os_str());
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -1974,7 +1983,7 @@ fn run_profile_executable(
         ),
     );
     let launch = if let Some(ticket) = launch_ticket {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             ProcessLaunch::AuthenticatedGame(AuthenticatedGameLaunch {
                 executable,
@@ -1985,7 +1994,7 @@ fn run_profile_executable(
                 ticket,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             emit_console_line_with_error(
                 app,
@@ -2005,11 +2014,11 @@ fn run_profile_executable(
 
 enum ProcessLaunch {
     Command(CommandBuilder),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     AuthenticatedGame(AuthenticatedGameLaunch),
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct AuthenticatedGameLaunch {
     executable: PathBuf,
     working_dir: PathBuf,
@@ -2151,6 +2160,160 @@ fn spawn_authenticated_game_process(
     Ok(Box::new(child))
 }
 
+#[cfg(windows)]
+struct WindowsAuthPipe {
+    handle: HANDLE,
+    name: String,
+}
+
+#[cfg(windows)]
+impl Drop for WindowsAuthPipe {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl WindowsAuthPipe {
+    fn create() -> Result<Self, String> {
+        let random: [u8; 16] = rand::random();
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let name = format!(
+            r"\\.\pipe\patchwork-auth-{}-{suffix}",
+            std::process::id()
+        );
+        let wide_name = name.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+        let handle = unsafe {
+            CreateNamedPipeW(
+                wide_name.as_ptr(),
+                PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                0,
+                0,
+                std::ptr::null(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "failed to create Windows auth pipe: {}",
+                windows_error(unsafe { GetLastError() })
+            ));
+        }
+        Ok(Self { handle, name })
+    }
+
+    fn write_ticket(&self, ticket: &str) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let connected = unsafe { ConnectNamedPipe(self.handle, std::ptr::null_mut()) } != 0;
+            if connected {
+                break;
+            }
+            let error = unsafe { GetLastError() };
+            if error == ERROR_PIPE_CONNECTED {
+                break;
+            }
+            if error != ERROR_PIPE_LISTENING {
+                return Err(format!(
+                    "failed while waiting for the game to connect to the auth pipe: {}",
+                    windows_error(error)
+                ));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("timed out waiting for the game to connect to the Windows auth pipe"
+                    .to_owned());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let blocking_mode = PIPE_WAIT | PIPE_READMODE_BYTE;
+        if unsafe {
+            SetNamedPipeHandleState(
+                self.handle,
+                &blocking_mode,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            return Err(format!(
+                "failed to switch Windows auth pipe to blocking mode: {}",
+                windows_error(unsafe { GetLastError() })
+            ));
+        }
+
+        let ticket = ticket.as_bytes();
+        let length = u32::try_from(ticket.len())
+            .map_err(|_| "launch ticket is too large for the auth pipe".to_owned())?;
+        let mut frame = Vec::with_capacity(4 + ticket.len());
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(ticket);
+        let mut written = 0_u32;
+        let success = unsafe {
+            WriteFile(
+                self.handle,
+                frame.as_ptr(),
+                u32::try_from(frame.len())
+                    .map_err(|_| "auth pipe frame is too large".to_owned())?,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if success == 0 || written as usize != frame.len() {
+            let detail = if success == 0 {
+                windows_error(unsafe { GetLastError() })
+            } else {
+                format!("only {written} of {} bytes were written", frame.len())
+            };
+            return Err(format!("failed to write launch ticket to Windows auth pipe: {detail}"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_error(code: u32) -> String {
+    format!("{} (Win32 error {code})", io::Error::from_raw_os_error(code as i32))
+}
+
+#[cfg(windows)]
+fn spawn_authenticated_game_process(
+    pair: &portable_pty::PtyPair,
+    launch: AuthenticatedGameLaunch,
+) -> Result<Box<dyn portable_pty::Child + Send + Sync>, String> {
+    let auth_pipe = WindowsAuthPipe::create()?;
+    let mut command = CommandBuilder::new(launch.executable.as_os_str());
+    command.cwd(launch.working_dir.as_os_str());
+    for argument in &launch.args {
+        command.arg(argument);
+    }
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("BACKEND_ADDR", &launch.backend);
+    command.env("PATCHWORK_AUTH_PIPE", &auth_pipe.name);
+    command.env("PATCHWORK_AUTH_PIPE_VERSION", "1");
+    for (name, value) in &launch.env {
+        command.env(name, value);
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to start authenticated game process: {error}"))?;
+    if let Err(error) = auth_pipe.write_ticket(&launch.ticket) {
+        let _ = child.kill();
+        return Err(error);
+    }
+    Ok(child)
+}
+
 fn run_pty_process(
     app: &AppHandle,
     tasks: Arc<Mutex<HashMap<String, PatchworkTaskState>>>,
@@ -2213,7 +2376,7 @@ fn run_pty_process(
             .slave
             .spawn_command(command)
             .map_err(|error| error.to_string()),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         ProcessLaunch::AuthenticatedGame(launch) => spawn_authenticated_game_process(&pair, launch),
     };
     let child = match child {
@@ -2540,6 +2703,7 @@ fn terminal_size(rows: u16, cols: u16) -> PtySize {
 
 fn profile_runnable(settings: &LauncherSettings, profile_id: &str, build_mode: &str) -> bool {
     executable_path(settings, profile_id, build_mode).is_file()
+        && profile_working_dir(settings, profile_id).is_dir()
 }
 
 fn executable_path(settings: &LauncherSettings, profile_id: &str, build_mode: &str) -> PathBuf {
@@ -2586,6 +2750,10 @@ fn cargo_executable_path(
     executable
 }
 
+fn profile_working_dir(settings: &LauncherSettings, profile_id: &str) -> PathBuf {
+    Path::new(&settings.build_cache).join(profile_id)
+}
+
 fn archive_built_executable(
     settings: &LauncherSettings,
     profile_id: &str,
@@ -2594,18 +2762,6 @@ fn archive_built_executable(
     let source = cargo_executable_path(settings, profile_id, build_mode);
     let destination = executable_path(settings, profile_id, build_mode);
 
-    if fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        if source.canonicalize().ok() == destination.canonicalize().ok() && destination.is_file() {
-            sync_cached_assets_link(settings, profile_id, build_mode)?;
-            return Ok(destination);
-        }
-        fs::remove_file(&source).map_err(|error| {
-            format!(
-                "Failed to remove stale executable symlink '{}': {error}",
-                source.display()
-            )
-        })?;
-    }
     if !source.is_file() {
         return Err(format!(
             "Cargo did not produce the expected executable at '{}'",
@@ -2655,119 +2811,93 @@ fn archive_built_executable(
             destination.display()
         )
     })?;
-    fs::remove_file(&source).map_err(|error| {
-        format!(
-            "Failed to remove Cargo executable '{}': {error}",
-            source.display()
-        )
-    })?;
-    create_executable_symlink(&destination, &source)?;
-    sync_cached_assets_link(settings, profile_id, build_mode)?;
+    copy_composed_assets(settings, profile_id, destination_parent)?;
     Ok(destination)
 }
 
-fn sync_cached_assets_link(
+fn copy_composed_assets(
     settings: &LauncherSettings,
     profile_id: &str,
-    build_mode: &str,
+    destination_parent: &Path,
 ) -> Result<(), String> {
-    let source = Path::new(&settings.build_cache)
-        .join(profile_id)
-        .join("assets");
-    let executable = executable_path(settings, profile_id, build_mode);
-    let parent = executable
-        .parent()
-        .ok_or_else(|| "Binary cache executable has no parent directory".to_owned())?;
-    fs::create_dir_all(parent).map_err(|error| {
-        format!(
-            "Failed to create binary cache directory '{}': {error}",
-            parent.display()
-        )
-    })?;
-    let link = parent.join("assets");
+    let source = profile_working_dir(settings, profile_id).join("assets");
+    let destination = destination_parent.join("assets");
 
-    match fs::symlink_metadata(&link) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            if source.is_dir() && link.canonicalize().ok() == source.canonicalize().ok() {
-                return Ok(());
-            }
-            fs::remove_file(&link).map_err(|error| {
+    match fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            fs::remove_dir_all(&destination).map_err(|error| {
                 format!(
-                    "Failed to remove stale assets symlink '{}': {error}",
-                    link.display()
+                    "Failed to replace cached assets '{}': {error}",
+                    destination.display()
                 )
             })?;
         }
         Ok(_) => {
-            return Err(format!(
-                "Refusing to replace non-symlink assets path '{}'",
-                link.display()
-            ));
+            fs::remove_file(&destination).map_err(|error| {
+                format!(
+                    "Failed to replace cached assets path '{}': {error}",
+                    destination.display()
+                )
+            })?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
-                "Failed to inspect assets path '{}': {error}",
-                link.display()
+                "Failed to inspect cached assets '{}': {error}",
+                destination.display()
             ));
         }
     }
-
     if !source.is_dir() {
         return Ok(());
     }
-    let source = source.canonicalize().map_err(|error| {
+
+    fs::create_dir_all(&destination).map_err(|error| {
         format!(
-            "Failed to canonicalize composed assets '{}': {error}",
-            source.display()
+            "Failed to create cached assets directory '{}': {error}",
+            destination.display()
         )
     })?;
-    create_directory_symlink(&source, &link)
+    copy_asset_directory(&source, &destination)
 }
 
-#[cfg(unix)]
-fn create_executable_symlink(destination: &Path, link: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(destination, link).map_err(|error| {
-        format!(
-            "Failed to create executable symlink '{}' -> '{}': {error}",
-            link.display(),
-            destination.display()
-        )
-    })
+fn copy_asset_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("Failed to read assets '{}': {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| {
+            format!("Failed to read an asset in '{}': {error}", source.display())
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "Failed to inspect asset '{}': {error}",
+                source_path.display()
+            )
+        })?;
+
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path).map_err(|error| {
+                format!(
+                    "Failed to create asset directory '{}': {error}",
+                    destination_path.display()
+                )
+            })?;
+            copy_asset_directory(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "Failed to copy asset '{}' to '{}': {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
-#[cfg(unix)]
-fn create_directory_symlink(destination: &Path, link: &Path) -> Result<(), String> {
-    std::os::unix::fs::symlink(destination, link).map_err(|error| {
-        format!(
-            "Failed to create assets symlink '{}' -> '{}': {error}",
-            link.display(),
-            destination.display()
-        )
-    })
-}
-
-#[cfg(windows)]
-fn create_directory_symlink(destination: &Path, link: &Path) -> Result<(), String> {
-    std::os::windows::fs::symlink_dir(destination, link).map_err(|error| {
-        format!(
-            "Failed to create assets symlink '{}' -> '{}': {error}",
-            link.display(),
-            destination.display()
-        )
-    })
-}
-
-#[cfg(windows)]
-fn create_executable_symlink(destination: &Path, link: &Path) -> Result<(), String> {
-    std::os::windows::fs::symlink_file(destination, link).map_err(|error| {
-        format!(
-            "Failed to create executable symlink '{}' -> '{}': {error}",
-            link.display(),
-            destination.display()
-        )
-    })
-}
 
 fn composed_package_name(project_dir: &Path) -> Option<String> {
     let source = fs::read_to_string(project_dir.join("Cargo.toml")).ok()?;
@@ -2800,9 +2930,8 @@ fn build_mode_label(mode: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
-    fn archives_built_executable_and_leaves_target_symlink() {
+    fn archives_built_executable_without_symlinks() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path();
         let mut settings = LauncherSettings::default_for(root);
@@ -2826,23 +2955,17 @@ mod tests {
         let cached = archive_built_executable(&settings, "example-profile", "release").unwrap();
 
         assert_eq!(fs::read(&cached).unwrap(), b"executable");
-        assert!(
-            fs::symlink_metadata(&cargo_executable)
-                .unwrap()
-                .file_type()
-                .is_symlink()
+        assert_eq!(fs::read(&cargo_executable).unwrap(), b"executable");
+        assert!(fs::symlink_metadata(&cargo_executable)
+            .is_ok_and(|metadata| !metadata.file_type().is_symlink()));
+        assert_eq!(
+            fs::read(cached.parent().unwrap().join("assets/example.txt")).unwrap(),
+            b"asset"
         );
         assert_eq!(
-            cargo_executable.canonicalize().unwrap(),
-            cached.canonicalize().unwrap()
+            fs::read(profile_working_dir(&settings, "example-profile").join("assets/example.txt"))
+                .unwrap(),
+            b"asset"
         );
-        let assets = cached.parent().unwrap().join("assets");
-        assert!(
-            fs::symlink_metadata(&assets)
-                .unwrap()
-                .file_type()
-                .is_symlink()
-        );
-        assert_eq!(fs::read(assets.join("example.txt")).unwrap(), b"asset");
     }
 }

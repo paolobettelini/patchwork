@@ -1,5 +1,5 @@
 use crate::error::{PatchworkError, Result};
-use crate::model::ModInfo;
+use crate::model::{ModInfo, Modpack, ProcessOptions};
 use crate::paths::{crate_dir, path_to_toml_string, relative_path_for_manifest};
 use std::collections::BTreeMap;
 use std::fs;
@@ -90,6 +90,9 @@ pub fn run_tasks(
     modpack: &Path,
     tasks: &[ResolvedCodegenTask],
 ) -> Result<()> {
+    let build_options = profile_build_options(modpack)?;
+    let cargo_arguments = expanded_build_arguments(&build_options, modpack)?;
+
     for task in tasks {
         prepare_generated_crate_backup(&task.output_crate_dir, &task.temporary_output_crate_dir)?;
 
@@ -101,7 +104,10 @@ pub fn run_tasks(
             // patch distributable Git-only helper libraries back to local
             // paths, while downloaded mod caches still use Git normally.
             .current_dir(mods_folder)
-            .arg("run")
+            .arg("run");
+        command.args(&cargo_arguments);
+        command.envs(&build_options.env);
+        command
             .arg("--manifest-path")
             .arg(&task.generator_manifest)
             .arg("--")
@@ -159,6 +165,32 @@ pub fn run_tasks(
     }
 
     Ok(())
+}
+
+fn profile_build_options(modpack_path: &Path) -> Result<ProcessOptions> {
+    let source = fs::read_to_string(modpack_path).map_err(|source| {
+        PatchworkError::io("read modpack for codegen options", modpack_path, source)
+    })?;
+    let modpack = toml::from_str::<Modpack>(&source)
+        .map_err(|source| PatchworkError::parse_toml("modpack", modpack_path, source))?;
+    Ok(modpack.options.build)
+}
+
+fn expanded_build_arguments(
+    options: &ProcessOptions,
+    modpack_path: &Path,
+) -> Result<Vec<String>> {
+    options.expanded_args().map_err(|reason| {
+        PatchworkError::InvalidModpackMetadata {
+            id: modpack_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("<unknown>")
+                .to_owned(),
+            manifest_path: modpack_path.to_path_buf(),
+            reason: format!("invalid profile build arguments: {reason}"),
+        }
+    })
 }
 
 fn prepare_generated_crate_backup(output_directory: &Path, backup_directory: &Path) -> Result<()> {
