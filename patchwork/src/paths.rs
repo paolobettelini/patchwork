@@ -18,7 +18,10 @@ pub fn relative_path_for_manifest(project_dir: &Path, path: &Path) -> PathBuf {
     };
 
     if let Some(parent) = project_dir.parent() {
-        if let Ok(relative_to_parent) = path.strip_prefix(parent) {
+        let parent = parent
+            .canonicalize()
+            .unwrap_or_else(|_| parent.to_path_buf());
+        if let Ok(relative_to_parent) = path.strip_prefix(&parent) {
             return PathBuf::from("..").join(relative_to_parent);
         }
     }
@@ -27,7 +30,17 @@ pub fn relative_path_for_manifest(project_dir: &Path, path: &Path) -> PathBuf {
 }
 
 pub fn path_to_toml_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    normalize_windows_verbatim_path(&path.to_string_lossy()).replace('\\', "/")
+}
+
+fn normalize_windows_verbatim_path(path: &str) -> String {
+    if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{path}")
+    } else if let Some(path) = path.strip_prefix(r"\\?\") {
+        path.to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 pub fn crate_dir(base: &Path, name: &str) -> Result<PathBuf> {
@@ -39,4 +52,26 @@ pub fn crate_dir(base: &Path, name: &str) -> Result<PathBuf> {
     }
 
     Ok(base.join(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_to_toml_string;
+    use std::path::Path;
+
+    #[test]
+    fn toml_path_strips_windows_verbatim_drive_prefix() {
+        assert_eq!(
+            path_to_toml_string(Path::new(r"\\?\C:\Users\example\patchwork\crate")),
+            "C:/Users/example/patchwork/crate"
+        );
+    }
+
+    #[test]
+    fn toml_path_strips_windows_verbatim_unc_prefix() {
+        assert_eq!(
+            path_to_toml_string(Path::new(r"\\?\UNC\server\share\patchwork\crate")),
+            "//server/share/patchwork/crate"
+        );
+    }
 }
