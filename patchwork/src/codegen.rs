@@ -3,9 +3,17 @@ use crate::model::{ModInfo, Modpack, ProcessOptions};
 use crate::paths::{crate_dir, path_to_toml_string, relative_path_for_manifest};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
+use std::thread;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone)]
 pub struct ResolvedCodegenTask {
@@ -89,6 +97,7 @@ pub fn run_tasks(
     modpacks_folder: &Path,
     modpack: &Path,
     tasks: &[ResolvedCodegenTask],
+    output: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     let build_options = profile_build_options(modpack)?;
     let cargo_arguments = expanded_build_arguments(&build_options, modpack)?;
@@ -107,6 +116,7 @@ pub fn run_tasks(
             .arg("run");
         command.args(&cargo_arguments);
         command.envs(&build_options.env);
+        command.env("CARGO_TERM_COLOR", "always");
         command
             .arg("--manifest-path")
             .arg(&task.generator_manifest)
@@ -130,7 +140,7 @@ pub fn run_tasks(
         if let Some(dev_crate_dir) = &task.dev_crate_dir {
             command.arg("--dev-crate").arg(dev_crate_dir);
         }
-        let status = match command.status() {
+        let status = match run_command_with_output(&mut command, output) {
             Ok(status) => status,
             Err(source) => {
                 restore_generated_crate_backup(
@@ -165,6 +175,75 @@ pub fn run_tasks(
     }
 
     Ok(())
+}
+
+fn run_command_with_output(
+    command: &mut Command,
+    output: &mut dyn FnMut(&[u8]),
+) -> io::Result<ExitStatus> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn()?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .expect("piped codegen stdout should be available");
+
+    let stderr = child
+        .stderr
+        .take()
+        .expect("piped codegen stderr should be available");
+
+    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+
+    let stdout_reader = spawn_output_reader(stdout, sender.clone());
+    let stderr_reader = spawn_output_reader(stderr, sender);
+
+    for chunk in receiver {
+        output(&chunk);
+    }
+
+    stdout_reader
+        .join()
+        .map_err(|_| io::Error::other("codegen stdout reader panicked"))??;
+
+    stderr_reader
+        .join()
+        .map_err(|_| io::Error::other("codegen stderr reader panicked"))??;
+
+    child.wait()
+}
+
+fn spawn_output_reader<R>(
+    mut reader: R,
+    sender: mpsc::Sender<Vec<u8>>,
+) -> thread::JoinHandle<io::Result<()>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+
+                Ok(length) => {
+                    if sender.send(buffer[..length].to_vec()).is_err() {
+                        return Ok(());
+                    }
+                }
+
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+
+                Err(error) => return Err(error),
+            }
+        }
+    })
 }
 
 fn profile_build_options(modpack_path: &Path) -> Result<ProcessOptions> {

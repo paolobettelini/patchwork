@@ -1729,12 +1729,23 @@ fn run_patchwork_task(
             &action,
             "[compose] Starting composition...",
         );
-        match patchwork::compose_with_modpacks(
+        let mut compose_output = |bytes: &[u8]| {
+            emit_console_bytes(
+                &app,
+                &tasks,
+                &profile_id,
+                &action,
+                bytes,
+            );
+        };
+
+        match patchwork::compose_with_modpacks_with_output(
             &profile_path,
             Some(profile_id.clone()),
             Path::new(&settings.mod_cache),
             Path::new(&settings.modpacks_cache),
             Path::new(&settings.build_cache),
+            &mut compose_output,
         ) {
             Ok(()) => {
                 emit_console_line(&app, &tasks, &profile_id, &action, "[compose] Done.");
@@ -2210,7 +2221,7 @@ impl WindowsAuthPipe {
     }
 
     fn write_ticket(&self, ticket: &str) -> Result<(), String> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
         loop {
             let connected = unsafe { ConnectNamedPipe(self.handle, std::ptr::null_mut()) } != 0;
             if connected {
@@ -2287,31 +2298,39 @@ fn windows_error(code: u32) -> String {
 fn spawn_authenticated_game_process(
     pair: &portable_pty::PtyPair,
     launch: AuthenticatedGameLaunch,
-) -> Result<Box<dyn portable_pty::Child + Send + Sync>, String> {
+) -> Result<
+    (
+        Box<dyn portable_pty::Child + Send + Sync>,
+        WindowsAuthPipe,
+        String,
+    ),
+    String,
+> {
     let auth_pipe = WindowsAuthPipe::create()?;
+
     let mut command = CommandBuilder::new(launch.executable.as_os_str());
     command.cwd(launch.working_dir.as_os_str());
+
     for argument in &launch.args {
         command.arg(argument);
     }
+
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     command.env("BACKEND_ADDR", &launch.backend);
     command.env("PATCHWORK_AUTH_PIPE", &auth_pipe.name);
     command.env("PATCHWORK_AUTH_PIPE_VERSION", "1");
+
     for (name, value) in &launch.env {
         command.env(name, value);
     }
 
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(command)
         .map_err(|error| format!("failed to start authenticated game process: {error}"))?;
-    if let Err(error) = auth_pipe.write_ticket(&launch.ticket) {
-        let _ = child.kill();
-        return Err(error);
-    }
-    Ok(child)
+
+    Ok((child, auth_pipe, launch.ticket))
 }
 
 fn run_pty_process(
@@ -2371,13 +2390,29 @@ fn run_pty_process(
         }
     };
 
+    #[cfg(windows)]
+    let mut pending_windows_auth: Option<(WindowsAuthPipe, String)> = None;
+
     let child = match launch {
         ProcessLaunch::Command(command) => pair
             .slave
             .spawn_command(command)
             .map_err(|error| error.to_string()),
-        #[cfg(any(unix, windows))]
-        ProcessLaunch::AuthenticatedGame(launch) => spawn_authenticated_game_process(&pair, launch),
+
+        #[cfg(unix)]
+        ProcessLaunch::AuthenticatedGame(launch) => {
+            spawn_authenticated_game_process(&pair, launch)
+        }
+
+        #[cfg(windows)]
+        ProcessLaunch::AuthenticatedGame(launch) => {
+            spawn_authenticated_game_process(&pair, launch).map(
+                |(child, auth_pipe, ticket)| {
+                    pending_windows_auth = Some((auth_pipe, ticket));
+                    child
+                },
+            )
+        }
     };
     let child = match child {
         Ok(child) => child,
@@ -2408,6 +2443,49 @@ fn run_pty_process(
         let action = action.to_string();
         thread::spawn(move || stream_pty_output(app, tasks, profile_id, action, reader))
     };
+
+    #[cfg(windows)]
+    if let Some((auth_pipe, ticket)) = pending_windows_auth {
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            "[auth] Waiting for the game to connect to the Windows auth pipe...",
+        );
+
+        if let Err(error) = auth_pipe.write_ticket(&ticket) {
+            if let Ok(mut tasks_guard) = tasks.lock() {
+                let task = tasks_guard.entry(profile_id.to_string()).or_default();
+
+                if let Some(mut child) = task.child.take() {
+                    let _ = child.kill();
+                }
+
+                task.pty_master = None;
+                task.pty_writer = None;
+            }
+
+            emit_console_line(
+                app,
+                &tasks,
+                profile_id,
+                action,
+                &format!("[auth] Failed: {error}"),
+            );
+
+            let _ = reader.join();
+            return false;
+        }
+
+        emit_console_line(
+            app,
+            &tasks,
+            profile_id,
+            action,
+            "[auth] Launch ticket delivered.",
+        );
+    }
 
     let mut succeeded = false;
     loop {

@@ -18,6 +18,7 @@ pub fn create_project(
     mods: Vec<(String, ModInfo)>,
     provider_map: HashMap<String, String>,
     owned_objects: HashSet<String>,
+    codegen_output: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     let project_dir = cache_folder.join(project_name);
 
@@ -164,6 +165,7 @@ pub fn create_project(
         modpacks_folder,
         modpack,
         &codegen_tasks,
+        codegen_output,
     )?;
     codegen::patch_generated_crates(&project_dir, &codegen_tasks)?;
 
