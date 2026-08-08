@@ -56,19 +56,13 @@ pub fn create_project(
     let dependencies = mods
         .iter()
         .map(|(modname, _modinfo)| {
-            let modpath = mods_folder
-                .join(modname)
-                .canonicalize()
-                .map_err(|source| {
-                    PatchworkError::io(
-                        "canonicalize selected mod path",
-                        mods_folder.join(modname),
-                        source,
-                    )
-                })?
-                .to_string_lossy()
-                .replace('\\', "/");
-            Ok(format!("{} = {{ path = \"{}\" }}", modname, modpath))
+            let mod_path = mods_folder.join(modname);
+            let mod_path = canonical_cargo_path(&mod_path, "canonicalize selected mod path")?;
+            Ok(format!(
+                "{} = {{ path = {} }}",
+                modname,
+                toml_string(&mod_path)
+            ))
         })
         .collect::<Result<Vec<_>>>()?
         .join("\n");
@@ -176,6 +170,29 @@ pub fn create_project(
     Ok(())
 }
 
+fn canonical_cargo_path(path: &Path, action: &'static str) -> Result<String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|source| PatchworkError::io(action, path, source))?;
+    Ok(cargo_path_string(&canonical))
+}
+
+fn cargo_path_string(path: &Path) -> String {
+    let path = path.to_string_lossy();
+
+    #[cfg(windows)]
+    {
+        if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{unc_path}");
+        }
+        if let Some(drive_path) = path.strip_prefix(r"\\?\") {
+            return drive_path.to_owned();
+        }
+    }
+
+    path.into_owned()
+}
+
 fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -> Result<String> {
     let mut git_sources = BTreeSet::new();
     for (mod_name, _) in mods {
@@ -200,20 +217,15 @@ fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -
     let patch_lines = mods
         .iter()
         .map(|(mod_name, _)| {
-            let mod_path = mods_folder
-                .join(mod_name)
-                .canonicalize()
-                .map_err(|source| {
-                    PatchworkError::io(
-                        "canonicalize selected mod path for Git patches",
-                        mods_folder.join(mod_name),
-                        source,
-                    )
-                })?;
+            let mod_path = mods_folder.join(mod_name);
+            let mod_path = canonical_cargo_path(
+                &mod_path,
+                "canonicalize selected mod path for Git patches",
+            )?;
             Ok(format!(
                 "{} = {{ path = {} }}",
                 toml_string(mod_name),
-                toml_string(&mod_path.to_string_lossy().replace('\\', "/"))
+                toml_string(&mod_path)
             ))
         })
         .collect::<Result<Vec<_>>>()?
