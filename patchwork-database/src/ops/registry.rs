@@ -27,7 +27,7 @@ use crate::validation::{
 };
 
 const PROVIDER_GITHUB: &str = "github";
-const MAX_SCAN_ENTRIES: usize = 1024;
+const MAX_SCAN_ENTRIES: usize = 4096;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
