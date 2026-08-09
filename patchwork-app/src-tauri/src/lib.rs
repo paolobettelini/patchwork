@@ -59,7 +59,7 @@ use paths::{
     is_valid_hex_color, non_empty_or, sanitize_build_mode, sanitize_existing_modpack_id,
     slugify_modpack_id,
 };
-use profile_options::{read_profile_options, validate_profile_options};
+use profile_options::{ensure_default_build_jobs, read_profile_options, validate_profile_options};
 
 #[tauri::command]
 fn select_folder() -> Option<String> {
@@ -911,7 +911,8 @@ fn start_patchwork_action(
             expected.display()
         ));
     }
-    let profile_options = read_profile_options(&profile_path)?;
+    let mut profile_options = read_profile_options(&profile_path)?;
+    ensure_default_build_jobs(&mut profile_options);
     validate_profile_options(&profile_options)?;
 
     let tasks = state.tasks.clone();

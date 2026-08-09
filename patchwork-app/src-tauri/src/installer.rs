@@ -3,7 +3,11 @@ use std::{
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
 };
 
 use flate2::read::GzDecoder;
@@ -92,6 +96,24 @@ enum InstallMode {
     Missing,
     Updates,
     CheckUpdates,
+}
+
+impl InstallMode {
+    const fn progress_phase(self) -> &'static str {
+        match self {
+            Self::Missing => "download",
+            Self::Updates => "updates",
+            Self::CheckUpdates => "refresh",
+        }
+    }
+}
+
+#[derive(Default)]
+struct TransferProgress {
+    completed: usize,
+    installed: usize,
+    last_started: Option<String>,
+    errors: Vec<String>,
 }
 
 struct DownloadGuard<'a> {
@@ -234,7 +256,7 @@ fn install_projects(
     emit_progress(
         app,
         true,
-        mode,
+        "discovery",
         0,
         roots.len(),
         None,
@@ -246,7 +268,7 @@ fn install_projects(
     emit_progress(
         app,
         false,
-        mode,
+        mode.progress_phase(),
         report.installed + report.up_to_date + report.errors.len(),
         report.installed + report.up_to_date + report.errors.len(),
         None,
@@ -319,7 +341,34 @@ impl<'a> Installer<'a> {
         mode: InstallMode,
         traverse_dependencies: bool,
     ) -> RegistryInstallReport {
+        let (candidates, mut report) = self.discover(app, roots, mode, traverse_dependencies);
+        let mut transfers = Vec::new();
+
+        for candidate in candidates {
+            if matches!(&candidate.source, CandidateSource::Cached) {
+                report.up_to_date += 1;
+            } else if mode == InstallMode::CheckUpdates {
+                report.installed += 1;
+            } else {
+                transfers.push(candidate);
+            }
+        }
+
+        if let Some(app) = app {
+            self.install_parallel(app, transfers, mode, &mut report);
+        }
+        report
+    }
+
+    fn discover(
+        &mut self,
+        app: Option<&AppHandle>,
+        roots: Vec<RegistryProjectRef>,
+        mode: InstallMode,
+        traverse_dependencies: bool,
+    ) -> (Vec<Candidate>, RegistryInstallReport) {
         let mut report = RegistryInstallReport::default();
+        let mut candidates = Vec::new();
         let mut scheduled = HashSet::new();
         let mut queue = roots
             .into_iter()
@@ -338,7 +387,7 @@ impl<'a> Installer<'a> {
                 emit_progress(
                     app,
                     true,
-                    mode,
+                    "discovery",
                     processed,
                     total,
                     Some(key.id.clone()),
@@ -355,7 +404,7 @@ impl<'a> Installer<'a> {
                         emit_progress(
                             app,
                             true,
-                            mode,
+                            "discovery",
                             processed,
                             scheduled.len(),
                             Some(key.id.clone()),
@@ -376,64 +425,120 @@ impl<'a> Installer<'a> {
                     }
                 }
             }
-
-            let operation = match (&candidate.source, mode) {
-                (_, InstallMode::CheckUpdates) => "Checking",
-                (CandidateSource::Cached, _) => "Checking cache for",
-                (CandidateSource::Local(_), _) => "Copying",
-                (CandidateSource::Remote(_), _) => "Downloading",
-            };
-            if let Some(app) = app {
-                emit_progress(
-                    app,
-                    true,
-                    mode,
-                    processed,
-                    scheduled.len(),
-                    Some(key.id.clone()),
-                    format!("{operation} {}", key.label()),
-                    report.errors.clone(),
-                );
-            }
-
-            let should_install = !matches!(&candidate.source, CandidateSource::Cached);
-            let mut succeeded = true;
-            if should_install {
-                if mode == InstallMode::CheckUpdates {
-                    report.installed += 1;
-                } else {
-                    match self.install_candidate(&candidate) {
-                        Ok(()) => report.installed += 1,
-                        Err(error) => {
-                            report
-                                .errors
-                                .push(format!("{}: {error}", candidate.key.label()));
-                            succeeded = false;
-                        }
-                    }
-                }
-            } else {
-                report.up_to_date += 1;
-            }
+            candidates.push(candidate);
             processed += 1;
             if let Some(app) = app {
                 emit_progress(
                     app,
                     true,
-                    mode,
+                    "discovery",
                     processed,
                     scheduled.len(),
                     Some(key.id.clone()),
-                    if succeeded {
-                        format!("Processed {}", key.label())
-                    } else {
-                        format!("Failed to install {}", key.label())
-                    },
+                    format!("Discovered {}", key.label()),
                     report.errors.clone(),
                 );
             }
         }
-        report
+        (candidates, report)
+    }
+
+    fn install_parallel(
+        &self,
+        app: &AppHandle,
+        candidates: Vec<Candidate>,
+        mode: InstallMode,
+        report: &mut RegistryInstallReport,
+    ) {
+        let total = candidates.len();
+        emit_progress(
+            app,
+            true,
+            mode.progress_phase(),
+            0,
+            total,
+            None,
+            "Downloading resolved dependencies".to_owned(),
+            report.errors.clone(),
+        );
+        if candidates.is_empty() {
+            return;
+        }
+
+        let workers = thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(16)
+            .min(total);
+        let queue = Mutex::new(VecDeque::from(candidates));
+        let settings = self.settings;
+        let progress = Mutex::new(TransferProgress {
+            errors: report.errors.clone(),
+            ..TransferProgress::default()
+        });
+
+        thread::scope(|scope| {
+            for _ in 0..workers {
+                let queue = &queue;
+                let progress = &progress;
+                scope.spawn(move || {
+                    loop {
+                        let candidate = queue.lock().ok().and_then(|mut queue| queue.pop_front());
+                        let Some(candidate) = candidate else {
+                            break;
+                        };
+                        let operation = match &candidate.source {
+                            CandidateSource::Cached => "Checking cache for",
+                            CandidateSource::Local(_) => "Copying",
+                            CandidateSource::Remote(_) => "Downloading",
+                        };
+                        if let Ok(mut progress) = progress.lock() {
+                            progress.last_started = Some(candidate.key.id.clone());
+                            emit_progress(
+                                app,
+                                true,
+                                mode.progress_phase(),
+                                progress.completed,
+                                total,
+                                progress.last_started.clone(),
+                                format!("{operation} {}", candidate.key.label()),
+                                progress.errors.clone(),
+                            );
+                        }
+
+                        let result = install_candidate(settings, &candidate);
+                        if let Ok(mut progress) = progress.lock() {
+                            match result {
+                                Ok(()) => progress.installed += 1,
+                                Err(error) => progress
+                                    .errors
+                                    .push(format!("{}: {error}", candidate.key.label())),
+                            }
+                            progress.completed += 1;
+                            emit_progress(
+                                app,
+                                true,
+                                mode.progress_phase(),
+                                progress.completed,
+                                total,
+                                progress.last_started.clone(),
+                                format!("Processed {}", candidate.key.label()),
+                                progress.errors.clone(),
+                            );
+                        }
+                    }
+                });
+            }
+        });
+
+        if let Ok(progress) = progress.into_inner() {
+            report.installed += progress.installed;
+            report.errors = progress.errors;
+        } else {
+            report
+                .errors
+                .push("download progress state became unavailable".to_owned());
+        }
     }
 
     fn resolve_candidate(
@@ -511,22 +616,22 @@ impl<'a> Installer<'a> {
             .get(key)
             .ok_or_else(|| "registry project lookup returned no data".to_owned())
     }
+}
 
-    fn install_candidate(&self, candidate: &Candidate) -> Result<(), String> {
-        match (&candidate.key.kind, &candidate.source) {
-            (_, CandidateSource::Cached) => Ok(()),
-            (RegistryProjectKind::Mod, CandidateSource::Local(project)) => {
-                install_local_mod(self.settings, project, &candidate.version)
-            }
-            (RegistryProjectKind::Modpack, CandidateSource::Local(project)) => {
-                install_local_modpack(self.settings, project)
-            }
-            (RegistryProjectKind::Mod, CandidateSource::Remote(details)) => {
-                install_remote_mod(self.settings, details)
-            }
-            (RegistryProjectKind::Modpack, CandidateSource::Remote(details)) => {
-                install_remote_modpack(self.settings, details)
-            }
+fn install_candidate(settings: &LauncherSettings, candidate: &Candidate) -> Result<(), String> {
+    match (&candidate.key.kind, &candidate.source) {
+        (_, CandidateSource::Cached) => Ok(()),
+        (RegistryProjectKind::Mod, CandidateSource::Local(project)) => {
+            install_local_mod(settings, project, &candidate.version)
+        }
+        (RegistryProjectKind::Modpack, CandidateSource::Local(project)) => {
+            install_local_modpack(settings, project)
+        }
+        (RegistryProjectKind::Mod, CandidateSource::Remote(details)) => {
+            install_remote_mod(settings, details)
+        }
+        (RegistryProjectKind::Modpack, CandidateSource::Remote(details)) => {
+            install_remote_modpack(settings, details)
         }
     }
 }
@@ -1126,7 +1231,7 @@ fn http_error_with_fallback(error: ureq::Error, fallback: &str) -> String {
 fn emit_progress(
     app: &AppHandle,
     running: bool,
-    mode: InstallMode,
+    phase: &str,
     completed: usize,
     total: usize,
     current: Option<String>,
@@ -1135,12 +1240,7 @@ fn emit_progress(
 ) {
     let event = RegistryDownloadEvent {
         running,
-        phase: match mode {
-            InstallMode::Missing => "download",
-            InstallMode::Updates => "updates",
-            InstallMode::CheckUpdates => "refresh",
-        }
-        .to_owned(),
+        phase: phase.to_owned(),
         completed,
         total,
         current,

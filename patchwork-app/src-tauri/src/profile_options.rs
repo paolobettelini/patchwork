@@ -21,7 +21,8 @@ pub(crate) fn load_profile_options(
     let profile_id = sanitize_existing_modpack_id(&profile_id)?;
     let build_mode = sanitize_build_mode(&build_mode)?;
     let profile_path = Path::new(&settings.profiles_dir).join(format!("{profile_id}.toml"));
-    let options = read_profile_options(&profile_path)?;
+    let mut options = read_profile_options(&profile_path)?;
+    ensure_default_build_jobs(&mut options);
     validate_profile_options(&options)?;
 
     Ok(ProfileOptionsView {
@@ -110,6 +111,28 @@ pub(crate) fn read_profile_options(
         .map(Option::unwrap_or_default)
 }
 
+pub(crate) fn ensure_default_build_jobs(options: &mut patchwork::ProfileOptions) {
+    let has_jobs = options
+        .build
+        .expanded_args()
+        .unwrap_or_default()
+        .iter()
+        .any(|argument| {
+            argument == "--jobs"
+                || argument.starts_with("--jobs=")
+                || argument == "-j"
+                || argument.strip_prefix("-j").is_some_and(|value| {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                })
+        });
+    if !has_jobs {
+        let jobs = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        options.build.args.push(format!("--jobs {jobs}"));
+    }
+}
+
 fn default_profile_options(
     settings: &LauncherSettings,
     build_mode: &str,
@@ -190,7 +213,10 @@ mod tests {
         let settings = LauncherSettings::default_for(temporary.path());
         let defaults = default_profile_options(&settings, "debug");
 
-        assert_eq!(defaults.run.env.get("PATCHWORK_AUTH_FD"), Some(&"3".to_owned()));
+        assert_eq!(
+            defaults.run.env.get("PATCHWORK_AUTH_FD"),
+            Some(&"3".to_owned())
+        );
         assert_eq!(
             defaults.run.env.get("PATCHWORK_AUTH_PIPE_VERSION"),
             Some(&"1".to_owned())

@@ -54,6 +54,7 @@ pub(crate) fn App() -> impl IntoView {
     let (browse_error, set_browse_error) = signal(None::<String>);
     let (browse_warnings, set_browse_warnings) = signal(Vec::<String>::new());
     let (browse_notice, set_browse_notice) = signal(None::<String>);
+    let (browse_generation, set_browse_generation) = signal(0_u64);
     let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
     let (project_pending, set_project_pending) = signal(false);
     let (project_error, set_project_error) = signal(None::<String>);
@@ -105,12 +106,18 @@ pub(crate) fn App() -> impl IntoView {
     });
 
     let browse_search = Callback::new(move |input: RegistryBrowseRequest| {
+        let generation = browse_generation.get_untracked().wrapping_add(1);
+        set_browse_generation.set(generation);
         set_browse_pending.set(true);
         set_browse_error.set(None);
         set_browse_notice.set(None);
         set_browse_warnings.set(Vec::new());
         leptos::task::spawn_local(async move {
-            match registry_browse(input).await {
+            let result = registry_browse(input).await;
+            if browse_generation.get_untracked() != generation {
+                return;
+            }
+            match result {
                 Ok(response) => {
                     set_browse_results.set(response.projects);
                     set_browse_warnings.set(response.warnings);
@@ -119,6 +126,17 @@ pub(crate) fn App() -> impl IntoView {
             }
             set_browse_pending.set(false);
         });
+    });
+    let backend_changed = Callback::new(move |()| {
+        set_project_details.set(None);
+        set_project_error.set(None);
+        set_public_profile.set(None);
+        set_public_profile_error.set(None);
+        set_registry_scan.set(None);
+        set_registry_progress.set(None);
+        set_registry_error.set(None);
+        set_registry_notice.set(None);
+        browse_search.run(RegistryBrowseRequest::default());
     });
     let browse_download_profile = Callback::new(move |project: RegistryBrowseProject| {
         let action_key = format!(
@@ -478,6 +496,7 @@ pub(crate) fn App() -> impl IntoView {
                         set_settings
                         set_modpacks
                         set_selected_modpack
+                        on_backend_changed=backend_changed
                     />
                 </section>
             </div>

@@ -40,6 +40,7 @@ pub(crate) fn SettingsPage(
     set_settings: WriteSignal<Option<LauncherSettings>>,
     set_modpacks: WriteSignal<Vec<LauncherModpack>>,
     set_selected_modpack: WriteSignal<usize>,
+    on_backend_changed: Callback<()>,
 ) -> impl IntoView {
     let (settings_tab, set_settings_tab) = signal(SettingsTab::General);
     let (local_entries, set_local_entries) = signal(Vec::<DynamicEntry>::new());
@@ -186,6 +187,7 @@ pub(crate) fn SettingsPage(
                                 .unwrap_or_default()
                         })
                         set_settings
+                        on_backend_changed
                     />
                 </div>
 
@@ -401,6 +403,7 @@ fn CacheAction(
 fn BackendField(
     value: impl Fn() -> String + Copy + Send + Sync + 'static,
     set_settings: WriteSignal<Option<LauncherSettings>>,
+    on_backend_changed: Callback<()>,
 ) -> impl IntoView {
     let (error, set_error) = signal(None::<String>);
     view! {
@@ -421,6 +424,7 @@ fn BackendField(
                             Ok(updated) => {
                                 set_error.set(None);
                                 set_settings.set(Some(updated));
+                                on_backend_changed.run(());
                             }
                             Err(error) => set_error.set(Some(js_error_to_string(error))),
                         }

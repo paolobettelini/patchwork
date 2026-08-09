@@ -944,7 +944,7 @@ fn authorize_login_html(query: &AuthorizeQuery, base_href: &str) -> String {
       <form class="auth-card" method="post" action="oauth/register" data-password-form data-register-form data-auth-panel="register">
         <img src="logo.png" alt="Patchwork">
         <h1>Create account</h1>
-        <p>Use a stable UUID-backed publisher account.</p>
+        <p>Create an account or sign in using an existing one.</p>
         <label>
           <span>Email</span>
           <input name="email" type="email" autocomplete="email" required autofocus>

@@ -13,6 +13,7 @@ use patchwork_registry_types::{
     RegistryBrowseResponse, RegistryBrowseSource, RegistryProjectDetails, RegistryProjectKind,
     RegistryProjectRef, RegistryPublishRequest, RegistryPublishResponse, RegistryScan,
     RegistryScanJobStarted, RegistryScanProgress, RegistryScanRequest, is_generated_mod_id,
+    registry_search_rank,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -79,10 +80,11 @@ pub(crate) async fn registry_publisher_profile(
 }
 
 fn fetch_publisher_profile(backend: &str, nickname: &str) -> Result<PublicProfile, String> {
-    let mut url = url::Url::parse(&endpoint_url(backend, "/api/profiles/")?)
+    let mut url = url::Url::parse(&endpoint_url(backend, "/api/profiles")?)
         .map_err(|error| error.to_string())?;
     url.path_segments_mut()
         .map_err(|_| "backend URL cannot contain profile path segments".to_owned())?
+        .pop_if_empty()
         .push(nickname);
     parse_json_response(
         ureq::get(url.as_str()).call(),
@@ -438,9 +440,9 @@ fn browse_registry(
             || !is_generated_mod_id(&project.project_id)
     });
     projects.sort_by(|left, right| {
-        left.title
-            .to_lowercase()
-            .cmp(&right.title.to_lowercase())
+        registry_search_rank(left, &input.query)
+            .cmp(&registry_search_rank(right, &input.query))
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
             .then_with(|| left.project_id.cmp(&right.project_id))
             .then_with(|| source_order(left.source).cmp(&source_order(right.source)))
     });

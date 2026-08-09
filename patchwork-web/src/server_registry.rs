@@ -22,7 +22,7 @@ use patchwork_registry_types::{
     RegistryDependencyKind, RegistryProjectDetails, RegistryProjectKind, RegistryPublishRequest,
     RegistryPublishResponse, RegistryPublishedVersion, RegistryRepository, RegistryScan,
     RegistryScanEntry, RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress,
-    RegistryScanRequest, RegistryScanStatus, is_generated_mod_id,
+    RegistryScanRequest, RegistryScanStatus, is_generated_mod_id, registry_search_rank,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -256,9 +256,9 @@ async fn search_registry(
             || !is_generated_mod_id(&project.project_id)
     });
     projects.sort_by(|left, right| {
-        right
-            .downloads
-            .cmp(&left.downloads)
+        registry_search_rank(left, &query.q)
+            .cmp(&registry_search_rank(right, &query.q))
+            .then_with(|| right.downloads.cmp(&left.downloads))
             .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
             .then_with(|| left.project_id.cmp(&right.project_id))
     });

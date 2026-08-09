@@ -115,6 +115,35 @@ impl RegistryBrowseProject {
     }
 }
 
+pub fn registry_search_rank(project: &RegistryBrowseProject, query: &str) -> u8 {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return 0;
+    }
+
+    let id = project.project_id.to_lowercase();
+    let title = project.title.to_lowercase();
+    if id == query {
+        0
+    } else if title == query {
+        1
+    } else if id.starts_with(&query) {
+        2
+    } else if title.starts_with(&query) {
+        3
+    } else if id.contains(&query) {
+        4
+    } else if title.contains(&query) {
+        5
+    } else if project.description.to_lowercase().contains(&query) {
+        6
+    } else if project.source_label.to_lowercase().contains(&query) {
+        7
+    } else {
+        8
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegistryBrowseResponse {
