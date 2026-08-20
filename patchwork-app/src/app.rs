@@ -462,6 +462,7 @@ pub(crate) fn App() -> impl IntoView {
                         pending=Signal::from(project_pending)
                         error=Signal::from(project_error)
                         on_open_dependency=open_registry_project
+                        on_open_dependency_tree=None
                         on_open_publisher=open_publisher
                     />
                 </section>

@@ -10,6 +10,7 @@ pub fn RegistryProjectPage(
     pending: Signal<bool>,
     error: Signal<Option<String>>,
     on_open_dependency: Callback<RegistryProjectRef>,
+    on_open_dependency_tree: Option<Callback<RegistryProjectRef>>,
     on_open_publisher: Callback<String>,
 ) -> impl IntoView {
     let (active_tab, set_active_tab) = signal("details");
@@ -44,6 +45,21 @@ pub fn RegistryProjectPage(
                 let dependencies = project.dependencies.clone();
                 let dependency_count = dependencies.len();
                 let details_for_panel = project.clone();
+                let dependency_tree_action = on_open_dependency_tree.clone().map(|open_tree| {
+                    let project_ref = RegistryProjectRef {
+                        project_kind: project.project_kind,
+                        project_id: project.project_id.clone(),
+                    };
+                    view! {
+                        <button
+                            type="button"
+                            class="registry-dependency-tree-action"
+                            on:click=move |_| open_tree.run(project_ref.clone())
+                        >
+                            "Dependency graph"
+                        </button>
+                    }
+                });
 
                 view! {
                     <section class="registry-project-hero">
@@ -53,6 +69,7 @@ pub fn RegistryProjectPage(
                                 <p class="catalog-kicker">{kind}</p>
                                 <h1>{title}</h1>
                                 <p>{description}</p>
+                                {dependency_tree_action}
                             </div>
                         </div>
                         <div class="registry-project-stats">

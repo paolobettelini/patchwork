@@ -183,6 +183,34 @@ pub struct RegistryProjectDetails {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RegistryDependencyGraph {
+    pub root_index: usize,
+    pub nodes: Vec<RegistryDependencyGraphNode>,
+    pub edges: Vec<RegistryDependencyGraphEdge>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryDependencyGraphNode {
+    pub project_kind: RegistryProjectKind,
+    pub project_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub version: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryDependencyGraphEdge {
+    pub from: usize,
+    pub to: usize,
+    pub kind: RegistryDependencyKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RegistryProfileOption {
     pub id: String,
     pub name: String,

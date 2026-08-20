@@ -794,6 +794,11 @@ fn CatalogProject(
     let image_url = project.image_url.clone();
     let title = project.title.clone();
     let project_id = project.project_id.clone();
+    let dependency_tree_kind = if is_modpack { "modpack" } else { "mod" };
+    let dependency_tree_href = format!(
+        "deptree/{dependency_tree_kind}/{}",
+        project.project_id
+    );
     let version = project.version.clone();
     let downloads = project.downloads;
 
@@ -830,6 +835,14 @@ fn CatalogProject(
                         "Downloads -".to_owned()
                     }}</span>
                     <span>{source}</span>
+                    <Show when=move || !allow_downloads && is_remote && !generated>
+                        <a
+                            class="catalog-secondary-action catalog-dependency-tree-action"
+                            href=dependency_tree_href.clone()
+                        >
+                            "Dependency graph"
+                        </a>
+                    </Show>
                 </div>
 
                 <Show when=move || allow_downloads && !generated>

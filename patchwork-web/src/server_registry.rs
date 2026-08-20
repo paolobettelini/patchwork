@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Cursor;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,9 @@ use patchwork_database::{
 };
 use patchwork_registry_types::{
     RegistryBrowseProject, RegistryBrowseResponse, RegistryBrowseSource, RegistryDependency,
-    RegistryDependencyKind, RegistryProjectDetails, RegistryProjectKind, RegistryPublishRequest,
+    RegistryDependencyGraph, RegistryDependencyGraphEdge, RegistryDependencyGraphNode,
+    RegistryDependencyKind, RegistryProjectDetails, RegistryProjectKind, RegistryProjectRef,
+    RegistryPublishRequest,
     RegistryPublishResponse, RegistryPublishedVersion, RegistryRepository, RegistryScan,
     RegistryScanEntry, RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress,
     RegistryScanRequest, RegistryScanStatus, is_generated_mod_id, registry_search_rank,
@@ -38,7 +40,7 @@ const SCAN_TTL_MINUTES: i64 = 20;
 const MAX_TREE_ENTRIES: usize = 100_000;
 const MAX_DIRECTORIES: usize = 10_000;
 const MAX_DIRECTORY_DEPTH: usize = 64;
-const MAX_MANIFESTS: usize = 1024;
+const MAX_MANIFESTS: usize = 4096;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const GITHUB_BLOB_CONCURRENCY: usize = 12;
 const SCAN_JOB_RETENTION_MINUTES: u64 = 30;
@@ -185,6 +187,10 @@ pub(crate) fn configure(config: &mut web::ServiceConfig) {
         .route(
             "/registry/projects/{project_kind}/{project_id}",
             web::get().to(get_project_details),
+        )
+        .route(
+            "/registry/deptree/{project_kind}/{project_id}",
+            web::get().to(get_project_dependency_graph),
         )
         .route(
             "/registry/projects/{project_kind}/{project_id}/source",
@@ -857,6 +863,139 @@ async fn get_project_details(
     }
     .ok_or_else(|| error::ErrorNotFound("published project was not found"))?;
     Ok(HttpResponse::Ok().json(details))
+}
+
+async fn get_project_dependency_graph(
+    state: web::Data<RegistryState>,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse> {
+    let (project_kind, project_id) = path.into_inner();
+    let project_kind = match project_kind.as_str() {
+        "mod" => RegistryProjectKind::Mod,
+        "modpack" => RegistryProjectKind::Modpack,
+        _ => return Err(error::ErrorNotFound("published project was not found")),
+    };
+    if project_kind == RegistryProjectKind::Mod && is_generated_mod_id(&project_id) {
+        return Err(error::ErrorNotFound("published project was not found"));
+    }
+    let root = RegistryProjectRef {
+        project_kind,
+        project_id,
+    };
+    let graph = project_dependency_graph(&state, &root)?
+        .ok_or_else(|| error::ErrorNotFound("published project was not found"))?;
+    Ok(HttpResponse::Ok().json(graph))
+}
+
+fn project_dependency_graph(
+    registry: &RegistryState,
+    root: &RegistryProjectRef,
+) -> Result<Option<RegistryDependencyGraph>> {
+    const MAX_GRAPH_NODES: usize = 1024;
+
+    let Some(root_details) = registry_project_details(registry, root)? else {
+        return Ok(None);
+    };
+
+    let mut nodes = vec![dependency_graph_node(&root_details)];
+    let mut indices = HashMap::from([((root.project_kind, root.project_id.clone()), 0)]);
+    let mut queue = VecDeque::from([(root.clone(), root_details)]);
+    let mut edges = Vec::new();
+    let mut seen_edges = HashSet::new();
+
+    while let Some((project, details)) = queue.pop_front() {
+        let from = indices[&(project.project_kind, project.project_id.clone())];
+        for dependency in details.dependencies {
+            if dependency.kind == RegistryDependencyKind::Ignore {
+                continue;
+            }
+
+            let key = (dependency.target_kind, dependency.target_id.clone());
+            let to = if let Some(index) = indices.get(&key).copied() {
+                index
+            } else {
+                if nodes.len() >= MAX_GRAPH_NODES {
+                    return Err(error::ErrorInternalServerError(
+                        "dependency graph exceeds the supported node limit",
+                    ));
+                }
+
+                let target = RegistryProjectRef {
+                    project_kind: dependency.target_kind,
+                    project_id: dependency.target_id.clone(),
+                };
+                let target_details = if target.project_kind == RegistryProjectKind::Mod
+                    && is_generated_mod_id(&target.project_id)
+                {
+                    None
+                } else {
+                    registry_project_details(registry, &target)?
+                };
+                let index = nodes.len();
+                indices.insert(key, index);
+                match target_details {
+                    Some(details) => {
+                        nodes.push(dependency_graph_node(&details));
+                        queue.push_back((target, details));
+                    }
+                    None => nodes.push(RegistryDependencyGraphNode {
+                        project_kind: target.project_kind,
+                        project_id: target.project_id,
+                        title: dependency.target_id.clone(),
+                        description: "This dependency is not published in the registry.".to_owned(),
+                        version: None,
+                        available: false,
+                    }),
+                }
+                index
+            };
+
+            if seen_edges.insert((from, to, dependency.kind)) {
+                edges.push(RegistryDependencyGraphEdge {
+                    from,
+                    to,
+                    kind: dependency.kind,
+                });
+            }
+        }
+    }
+
+    Ok(Some(RegistryDependencyGraph {
+        root_index: 0,
+        nodes,
+        edges,
+    }))
+}
+
+fn registry_project_details(
+    registry: &RegistryState,
+    project: &RegistryProjectRef,
+) -> Result<Option<RegistryProjectDetails>> {
+    match project.project_kind {
+        RegistryProjectKind::Mod => mod_details(registry, &project.project_id),
+        RegistryProjectKind::Modpack => modpack_details(registry, &project.project_id),
+    }
+}
+
+fn dependency_graph_node(details: &RegistryProjectDetails) -> RegistryDependencyGraphNode {
+    let description = if details.description.trim().is_empty() {
+        match details.project_kind {
+            RegistryProjectKind::Mod => {
+                format!("Patchwork mod crate '{}'.", details.project_id)
+            }
+            RegistryProjectKind::Modpack => "No description provided yet.".to_owned(),
+        }
+    } else {
+        details.description.clone()
+    };
+    RegistryDependencyGraphNode {
+        project_kind: details.project_kind,
+        project_id: details.project_id.clone(),
+        title: details.title.clone(),
+        description,
+        version: Some(details.version.clone()),
+        available: true,
+    }
 }
 
 fn mod_details(

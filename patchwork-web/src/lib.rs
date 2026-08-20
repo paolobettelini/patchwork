@@ -2,6 +2,8 @@ pub mod auth_types;
 
 #[cfg(feature = "csr")]
 mod app;
+#[cfg(feature = "csr")]
+mod deptree;
 
 #[cfg(feature = "csr")]
 use leptos::{mount::mount_to_body, prelude::*};

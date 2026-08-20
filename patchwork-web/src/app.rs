@@ -1,5 +1,7 @@
 use std::fmt::Write as _;
 
+use crate::deptree::DependencyTreePage;
+
 use crate::auth_types::{
     GithubAccountDto, LoginRequest, ProfileDto, PublicProfileDto, PublishedProjectDto,
     RegisterRequest, RegistrationChallengeDto, UpdateNicknameRequest, VerifyRegistrationRequest,
@@ -9,7 +11,8 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::prelude::*;
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
-    RegistryBrowseResponse, RegistryProfileOption, RegistryProjectDetails, RegistryProjectKind,
+    RegistryBrowseResponse, RegistryDependencyGraph, RegistryProfileOption, RegistryProjectDetails,
+    RegistryProjectKind,
     RegistryProjectRef, RegistryPublishRequest, RegistryPublishResponse, RegistryScan,
     RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress, RegistryScanRequest,
     is_generated_mod_id,
@@ -30,6 +33,7 @@ enum WebPage {
     Upload,
     Profile,
     Project,
+    DependencyTree,
     NotFound,
 }
 
@@ -69,6 +73,9 @@ pub(crate) fn WebApp() -> impl IntoView {
     let (project_details, set_project_details) = signal(None::<RegistryProjectDetails>);
     let (project_pending, set_project_pending) = signal(false);
     let (project_error, set_project_error) = signal(None::<String>);
+    let (dependency_graph, set_dependency_graph) = signal(None::<RegistryDependencyGraph>);
+    let (dependency_graph_pending, set_dependency_graph_pending) = signal(false);
+    let (dependency_graph_error, set_dependency_graph_error) = signal(None::<String>);
     let (viewed_profile, set_viewed_profile) = signal(None::<PublicProfileDto>);
     let (viewed_profile_pending, set_viewed_profile_pending) = signal(false);
     let (viewed_profile_error, set_viewed_profile_error) = signal(None::<String>);
@@ -93,6 +100,10 @@ pub(crate) fn WebApp() -> impl IntoView {
             path.push_str(&format!("?scan={scan_id}&entry={entry_id}"));
         }
         navigate_to(&path);
+    });
+
+    let open_dependency_tree = Callback::new(move |project: RegistryProjectRef| {
+        navigate_to(&dependency_tree_path(&project));
     });
 
     let browse_search = Callback::new(move |input: RegistryBrowseRequest| {
@@ -246,10 +257,21 @@ pub(crate) fn WebApp() -> impl IntoView {
         });
     }
 
+    if let Some(project) = current_dependency_tree_project_ref() {
+        set_dependency_graph_pending.set(true);
+        leptos::task::spawn_local(async move {
+            match fetch_dependency_graph(&project).await {
+                Ok(graph) => set_dependency_graph.set(Some(graph)),
+                Err(message) => set_dependency_graph_error.set(Some(message)),
+            }
+            set_dependency_graph_pending.set(false);
+        });
+    }
+
     view! {
         <div class="app-shell" data-theme=move || active_theme.get()>
             <TopBar active_page=page profile set_profile set_show_auth active_theme set_active_theme />
-            <main class="web-workspace">
+            <main class=if page == WebPage::DependencyTree { "web-workspace deptree-workspace" } else { "web-workspace" }>
                 {match page {
                     WebPage::Home => view! { <HomePage /> }.into_any(),
                     WebPage::Browse => view! {
@@ -304,7 +326,16 @@ pub(crate) fn WebApp() -> impl IntoView {
                             pending=Signal::from(project_pending)
                             error=Signal::from(project_error)
                             on_open_dependency=open_project
+                            on_open_dependency_tree=Some(open_dependency_tree)
                             on_open_publisher=open_publisher
+                        />
+                    }.into_any(),
+                    WebPage::DependencyTree => view! {
+                        <DependencyTreePage
+                            graph=Signal::from(dependency_graph)
+                            pending=Signal::from(dependency_graph_pending)
+                            error=Signal::from(dependency_graph_error)
+                            on_open_project=open_project
                         />
                     }.into_any(),
                     WebPage::NotFound => view! { <NotFoundPage /> }.into_any(),
@@ -1067,6 +1098,7 @@ fn current_page() -> WebPage {
         "/upload" => WebPage::Upload,
         "/profile" => WebPage::Profile,
         _ if current_profile_nickname().is_some() => WebPage::Profile,
+        _ if current_dependency_tree_project_ref().is_some() => WebPage::DependencyTree,
         _ if current_project_ref().is_some() => WebPage::Project,
         _ => WebPage::NotFound,
     }
@@ -1083,6 +1115,30 @@ fn current_profile_nickname() -> Option<String> {
         return None;
     }
     Some(nickname.to_owned())
+}
+
+fn current_dependency_tree_project_ref() -> Option<RegistryProjectRef> {
+    let path = current_path();
+    let mut segments = path.trim_matches('/').split('/');
+    if segments.next()? != "deptree" {
+        return None;
+    }
+    let project_kind = match segments.next()? {
+        "mod" => RegistryProjectKind::Mod,
+        "modpack" => RegistryProjectKind::Modpack,
+        _ => return None,
+    };
+    let project_id = segments.next()?.trim();
+    if project_id.is_empty() || segments.next().is_some() {
+        return None;
+    }
+    if project_kind == RegistryProjectKind::Mod && is_generated_mod_id(project_id) {
+        return None;
+    }
+    Some(RegistryProjectRef {
+        project_kind,
+        project_id: project_id.to_owned(),
+    })
 }
 
 fn current_project_ref() -> Option<RegistryProjectRef> {
@@ -1112,6 +1168,14 @@ fn project_path(project: &RegistryProjectRef) -> String {
         project.project_kind.route_segment(),
         project.project_id
     )
+}
+
+fn dependency_tree_path(project: &RegistryProjectRef) -> String {
+    let kind = match project.project_kind {
+        RegistryProjectKind::Mod => "mod",
+        RegistryProjectKind::Modpack => "modpack",
+    };
+    format!("/deptree/{kind}/{}", project.project_id)
 }
 
 fn profile_path(nickname: &str) -> String {
@@ -1306,6 +1370,23 @@ async fn fetch_registry_project(
     .await
     .map_err(|error| error.to_string())?;
     parse_json_response(response, "could not load registry project").await
+}
+
+async fn fetch_dependency_graph(
+    project: &RegistryProjectRef,
+) -> Result<RegistryDependencyGraph, String> {
+    let kind = match project.project_kind {
+        RegistryProjectKind::Mod => "mod",
+        RegistryProjectKind::Modpack => "modpack",
+    };
+    let response = Request::get(&app_url(&format!(
+        "/registry/deptree/{kind}/{}",
+        project.project_id
+    )))
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    parse_json_response(response, "could not load dependency graph").await
 }
 
 async fn fetch_scan_project_details(
