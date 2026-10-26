@@ -40,6 +40,7 @@ mod cache_settings;
 mod installer;
 mod model;
 mod paths;
+mod pipe_output;
 mod profile_options;
 mod registry;
 pub mod remote_cache;
@@ -1772,8 +1773,10 @@ fn run_patchwork_task(
             &action,
             "[compose] Starting composition...",
         );
+        let mut pipe_output = pipe_output::PipeOutput::default();
         let mut compose_output = |bytes: &[u8]| {
-            emit_console_bytes(&app, &tasks, &profile_id, &action, bytes);
+            let bytes = pipe_output.for_terminal(bytes);
+            emit_console_bytes(&app, &tasks, &profile_id, &action, &bytes);
         };
 
         match patchwork::compose_with_modpacks_with_environment(
