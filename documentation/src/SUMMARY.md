@@ -19,6 +19,7 @@
 # Applications and services
 
 - [Desktop launcher](./desktop_launcher.md)
+- [Remote compilation cache](./remote_cache.md)
 - [Web service](./web_service.md)
 - [Accounts and authentication](./authentication.md)
 - [Game authentication and server transfer](./game_authentication.md)

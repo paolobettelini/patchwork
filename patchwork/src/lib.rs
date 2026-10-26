@@ -59,6 +59,34 @@ pub fn compose_with_modpacks_with_output<
     mods_folder: Q,
     modpacks_folder: R,
     cache_folder: S,
+    on_output: F,
+) -> Result<()> {
+    compose_with_modpacks_with_environment(
+        modpack,
+        project_name,
+        mods_folder,
+        modpacks_folder,
+        cache_folder,
+        &std::collections::BTreeMap::new(),
+        on_output,
+    )
+}
+
+/// Compose with per-operation overrides for Cargo subprocesses, including codegen.
+/// A `None` value removes an inherited variable. The parent environment is unchanged.
+pub fn compose_with_modpacks_with_environment<
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+    R: AsRef<Path>,
+    S: AsRef<Path>,
+    F: FnMut(&[u8]),
+>(
+    modpack: P,
+    project_name: Option<String>,
+    mods_folder: Q,
+    modpacks_folder: R,
+    cache_folder: S,
+    cargo_environment: &std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>>,
     mut on_output: F,
 ) -> Result<()> {
     let mods_folder = mods_folder.as_ref().canonicalize().map_err(|source| {
@@ -99,6 +127,7 @@ pub fn compose_with_modpacks_with_output<
         graph.mods,
         graph.provider_map,
         graph.owned_objects,
+        cargo_environment,
         &mut on_output,
     )?;
 

@@ -35,15 +35,25 @@ fn main() -> ExitCode {
 }
 
 fn app_dir() -> Result<PathBuf, String> {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    // Cargo supplies the current checkout at runtime, even when a shared target
+    // directory reuses a tool binary originally compiled in another checkout.
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .ok_or_else(|| "run this tool through cargo run --manifest-path tools/desktop-tool/Cargo.toml -- <command>".to_owned())?;
+    let directory = manifest_dir
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
-        .ok_or_else(|| "cannot determine patchwork-app directory".to_owned())
+        .ok_or_else(|| "cannot determine patchwork-app directory".to_owned())?;
+    if !directory.join("src-tauri/tauri.conf.json").is_file() {
+        return Err(format!("invalid patchwork-app directory: {}", directory.display()));
+    }
+    Ok(directory)
 }
 
 fn run_tauri(arguments: &[&str]) -> Result<(), String> {
     let app_dir = app_dir()?;
+    println!("Building Patchwork from: {}", app_dir.display());
     let mut command = Command::new("cargo");
     command.arg("tauri").args(arguments).current_dir(&app_dir);
     run_checked(&mut command, "cargo tauri")

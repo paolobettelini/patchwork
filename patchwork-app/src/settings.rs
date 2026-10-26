@@ -11,6 +11,8 @@ use leptos::prelude::*;
 use patchwork_ui::THEMES;
 use wasm_bindgen::JsValue;
 
+mod remote_cache;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DynamicEntry {
     id: u32,
@@ -129,8 +131,17 @@ pub(crate) fn SettingsPage(
                     >
                         "Installation"
                     </button>
+                    <button type="button"
+                        class=move || segmented_class(settings_tab.get() == SettingsTab::RemoteCache)
+                        on:click=move |_| set_settings_tab.set(SettingsTab::RemoteCache)>
+                        "Remote cache"
+                    </button>
                 </div>
             </div>
+
+            <section class=move || settings_panel_class(settings_tab.get() == SettingsTab::RemoteCache)>
+                <remote_cache::RemoteCachePanel settings set_settings />
+            </section>
 
             <section class=move || settings_panel_class(settings_tab.get() == SettingsTab::General)>
                 <div class="settings-section">

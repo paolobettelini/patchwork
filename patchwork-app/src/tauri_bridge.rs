@@ -18,6 +18,48 @@ const PATCHWORK_CONSOLE_EVENT: &str = "patchwork-console";
 const PATCHWORK_AUTH_EVENT: &str = "patchwork-auth";
 const PATCHWORK_DOWNLOAD_EVENT: &str = "patchwork-download";
 
+pub(crate) async fn save_remote_cache(
+    config: crate::cache_settings::RemoteCacheSettings,
+    credentials: Option<crate::cache_settings::CacheCredentials>,
+) -> Result<LauncherSettings, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        config: crate::cache_settings::RemoteCacheSettings,
+        credentials: Option<crate::cache_settings::CacheCredentials>,
+    }
+    invoke(
+        "save_remote_cache",
+        &Args {
+            config,
+            credentials,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn test_remote_cache(
+    config: crate::cache_settings::RemoteCacheSettings,
+    credentials: Option<crate::cache_settings::CacheCredentials>,
+) -> Result<String, JsValue> {
+    #[derive(Serialize)]
+    struct Args {
+        config: crate::cache_settings::RemoteCacheSettings,
+        credentials: Option<crate::cache_settings::CacheCredentials>,
+    }
+    invoke(
+        "test_remote_cache",
+        &Args {
+            config,
+            credentials,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn remote_cache_credentials_status() -> Result<bool, JsValue> {
+    invoke("remote_cache_credentials_status", &()).await
+}
+
 pub(crate) async fn select_folder() -> Result<Option<String>, JsValue> {
     invoke("select_folder", &()).await
 }

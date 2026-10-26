@@ -2,6 +2,8 @@ use leptos::{mount::mount_to_body, prelude::*};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 mod app;
+#[path = "../shared/remote_cache.rs"]
+mod cache_settings;
 mod home;
 mod icons;
 mod model;

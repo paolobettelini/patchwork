@@ -18,6 +18,7 @@ pub fn create_project(
     mods: Vec<(String, ModInfo)>,
     provider_map: HashMap<String, String>,
     owned_objects: HashSet<String>,
+    cargo_environment: &std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>>,
     codegen_output: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     let project_dir = cache_folder.join(project_name);
@@ -165,6 +166,7 @@ pub fn create_project(
         modpacks_folder,
         modpack,
         &codegen_tasks,
+        cargo_environment,
         codegen_output,
     )?;
     codegen::patch_generated_crates(&project_dir, &codegen_tasks)?;
@@ -220,10 +222,8 @@ fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -
         .iter()
         .map(|(mod_name, _)| {
             let mod_path = mods_folder.join(mod_name);
-            let mod_path = canonical_cargo_path(
-                &mod_path,
-                "canonicalize selected mod path for Git patches",
-            )?;
+            let mod_path =
+                canonical_cargo_path(&mod_path, "canonicalize selected mod path for Git patches")?;
             Ok(format!(
                 "{} = {{ path = {} }}",
                 toml_string(mod_name),

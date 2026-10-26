@@ -97,6 +97,7 @@ pub fn run_tasks(
     modpacks_folder: &Path,
     modpack: &Path,
     tasks: &[ResolvedCodegenTask],
+    cargo_environment: &std::collections::BTreeMap<std::ffi::OsString, Option<std::ffi::OsString>>,
     output: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
     let build_options = profile_build_options(modpack)?;
@@ -117,6 +118,16 @@ pub fn run_tasks(
         command.args(&cargo_arguments);
         command.envs(&build_options.env);
         command.env("CARGO_TERM_COLOR", "always");
+        for (key, value) in cargo_environment {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
         command
             .arg("--manifest-path")
             .arg(&task.generator_manifest)
@@ -255,12 +266,10 @@ fn profile_build_options(modpack_path: &Path) -> Result<ProcessOptions> {
     Ok(modpack.options.build)
 }
 
-fn expanded_build_arguments(
-    options: &ProcessOptions,
-    modpack_path: &Path,
-) -> Result<Vec<String>> {
-    options.expanded_args().map_err(|reason| {
-        PatchworkError::InvalidModpackMetadata {
+fn expanded_build_arguments(options: &ProcessOptions, modpack_path: &Path) -> Result<Vec<String>> {
+    options
+        .expanded_args()
+        .map_err(|reason| PatchworkError::InvalidModpackMetadata {
             id: modpack_path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -268,8 +277,7 @@ fn expanded_build_arguments(
                 .to_owned(),
             manifest_path: modpack_path.to_path_buf(),
             reason: format!("invalid profile build arguments: {reason}"),
-        }
-    })
+        })
 }
 
 fn prepare_generated_crate_backup(output_directory: &Path, backup_directory: &Path) -> Result<()> {

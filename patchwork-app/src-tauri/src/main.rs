@@ -4,5 +4,9 @@
 )]
 
 fn main() {
+    if patchwork_app_tauri::remote_cache::wrapper_requested() {
+        patchwork_app_tauri::remote_cache::wrapper_main();
+        return;
+    }
     patchwork_app_tauri::run();
 }

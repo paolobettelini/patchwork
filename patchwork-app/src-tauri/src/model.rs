@@ -52,6 +52,8 @@ pub(crate) struct PatchworkTaskState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LauncherSettings {
+    #[serde(default)]
+    pub(crate) remote_cache: crate::cache_settings::RemoteCacheSettings,
     #[serde(default = "default_theme")]
     pub(crate) theme: String,
     #[serde(default = "default_auth_server_url")]
@@ -193,6 +195,7 @@ impl LauncherSettings {
         let cache_dir = patchwork_data.join("cache");
         Self {
             theme: default_theme(),
+            remote_cache: Default::default(),
             backend: default_auth_server_url(),
             local_folders: Vec::new(),
             cargo_target_dir: display_path(&patchwork_data.join("target")),

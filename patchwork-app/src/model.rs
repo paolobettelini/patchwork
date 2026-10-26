@@ -17,11 +17,14 @@ pub(crate) enum SettingsTab {
     General,
     Registries,
     Installation,
+    RemoteCache,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LauncherSettings {
+    #[serde(default)]
+    pub(crate) remote_cache: crate::cache_settings::RemoteCacheSettings,
     pub(crate) theme: String,
     pub(crate) backend: String,
     #[serde(default)]

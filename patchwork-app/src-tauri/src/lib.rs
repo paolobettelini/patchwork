@@ -19,6 +19,7 @@ use std::{
     os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Command, Stdio},
 };
+use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{
@@ -31,15 +32,17 @@ use windows_sys::Win32::{
         PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT, SetNamedPipeHandleState,
     },
 };
-use tauri::{AppHandle, Emitter, Manager, State};
 
 mod assets;
 mod auth;
+#[path = "../../shared/remote_cache.rs"]
+mod cache_settings;
 mod installer;
 mod model;
 mod paths;
 mod profile_options;
 mod registry;
+pub mod remote_cache;
 
 use assets::{
     ICON_EXTENSIONS, copy_icon_to_profile, deterministic_color_for, icon_version_for,
@@ -1184,6 +1187,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            remote_cache::save_remote_cache,
+            remote_cache::remote_cache_credentials_status,
+            remote_cache::test_remote_cache,
             select_folder,
             select_settings_file,
             select_icon_file,
@@ -1722,6 +1728,42 @@ fn run_patchwork_task(
         }
     }
 
+    let cache_session = if matches!(action.as_str(), "compose-build" | "compose" | "build") {
+        match remote_cache::CacheSession::start(&app, &settings) {
+            Ok(session) => session,
+            Err(error) => {
+                emit_console_line_with_error(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[cache] Failed: {error}"),
+                    Some(error),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let mut cargo_environment = remote_cache::CargoEnvironment::new();
+    if let Some(session) = &cache_session {
+        cargo_environment.extend(session.environment.clone());
+        emit_console_line(
+            &app,
+            &tasks,
+            &profile_id,
+            &action,
+            "[cache] Embedded sccache enabled; incremental compilation disabled.",
+        );
+    }
+    if !settings.cargo_target_dir.trim().is_empty() {
+        cargo_environment.insert(
+            "CARGO_TARGET_DIR".into(),
+            Some(settings.cargo_target_dir.clone().into()),
+        );
+    }
+
     if matches!(action.as_str(), "compose-build" | "compose" | "build") {
         emit_console_line(
             &app,
@@ -1731,21 +1773,16 @@ fn run_patchwork_task(
             "[compose] Starting composition...",
         );
         let mut compose_output = |bytes: &[u8]| {
-            emit_console_bytes(
-                &app,
-                &tasks,
-                &profile_id,
-                &action,
-                bytes,
-            );
+            emit_console_bytes(&app, &tasks, &profile_id, &action, bytes);
         };
 
-        match patchwork::compose_with_modpacks_with_output(
+        match patchwork::compose_with_modpacks_with_environment(
             &profile_path,
             Some(profile_id.clone()),
             Path::new(&settings.mod_cache),
             Path::new(&settings.modpacks_cache),
             Path::new(&settings.build_cache),
+            &cargo_environment,
             &mut compose_output,
         ) {
             Ok(()) => {
@@ -1777,6 +1814,7 @@ fn run_patchwork_task(
             &build_mode,
             &settings,
             &profile_options.build,
+            &cargo_environment,
         ) {
             match archive_built_executable(&settings, &profile_id, &build_mode) {
                 Ok(path) => emit_console_line(
@@ -1818,6 +1856,7 @@ fn run_cargo_build(
     build_mode: &str,
     settings: &LauncherSettings,
     options: &patchwork::ProcessOptions,
+    cargo_environment: &remote_cache::CargoEnvironment,
 ) -> bool {
     if !project_dir.join("Cargo.toml").is_file() {
         emit_console_line(
@@ -1863,6 +1902,16 @@ fn run_cargo_build(
     }
     for (name, value) in &options.env {
         command.env(name, value);
+    }
+    for (name, value) in cargo_environment {
+        match value {
+            Some(value) => {
+                command.env(name, value);
+            }
+            None => {
+                command.env_remove(name);
+            }
+        }
     }
 
     emit_console_line(
@@ -2195,11 +2244,11 @@ impl WindowsAuthPipe {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let name = format!(
-            r"\\.\pipe\patchwork-auth-{}-{suffix}",
-            std::process::id()
-        );
-        let wide_name = name.encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+        let name = format!(r"\\.\pipe\patchwork-auth-{}-{suffix}", std::process::id());
+        let wide_name = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
         let handle = unsafe {
             CreateNamedPipeW(
                 wide_name.as_ptr(),
@@ -2239,8 +2288,9 @@ impl WindowsAuthPipe {
                 ));
             }
             if std::time::Instant::now() >= deadline {
-                return Err("timed out waiting for the game to connect to the Windows auth pipe"
-                    .to_owned());
+                return Err(
+                    "timed out waiting for the game to connect to the Windows auth pipe".to_owned(),
+                );
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -2284,7 +2334,9 @@ impl WindowsAuthPipe {
             } else {
                 format!("only {written} of {} bytes were written", frame.len())
             };
-            return Err(format!("failed to write launch ticket to Windows auth pipe: {detail}"));
+            return Err(format!(
+                "failed to write launch ticket to Windows auth pipe: {detail}"
+            ));
         }
         Ok(())
     }
@@ -2292,7 +2344,10 @@ impl WindowsAuthPipe {
 
 #[cfg(windows)]
 fn windows_error(code: u32) -> String {
-    format!("{} (Win32 error {code})", io::Error::from_raw_os_error(code as i32))
+    format!(
+        "{} (Win32 error {code})",
+        io::Error::from_raw_os_error(code as i32)
+    )
 }
 
 #[cfg(windows)]
@@ -2401,19 +2456,14 @@ fn run_pty_process(
             .map_err(|error| error.to_string()),
 
         #[cfg(unix)]
-        ProcessLaunch::AuthenticatedGame(launch) => {
-            spawn_authenticated_game_process(&pair, launch)
-        }
+        ProcessLaunch::AuthenticatedGame(launch) => spawn_authenticated_game_process(&pair, launch),
 
         #[cfg(windows)]
-        ProcessLaunch::AuthenticatedGame(launch) => {
-            spawn_authenticated_game_process(&pair, launch).map(
-                |(child, auth_pipe, ticket)| {
-                    pending_windows_auth = Some((auth_pipe, ticket));
-                    child
-                },
-            )
-        }
+        ProcessLaunch::AuthenticatedGame(launch) => spawn_authenticated_game_process(&pair, launch)
+            .map(|(child, auth_pipe, ticket)| {
+                pending_windows_auth = Some((auth_pipe, ticket));
+                child
+            }),
     };
     let child = match child {
         Ok(child) => child,
@@ -2977,7 +3027,6 @@ fn copy_asset_directory(source: &Path, destination: &Path) -> Result<(), String>
     Ok(())
 }
 
-
 fn composed_package_name(project_dir: &Path) -> Option<String> {
     let source = fs::read_to_string(project_dir.join("Cargo.toml")).ok()?;
     let table = source.parse::<toml::Table>().ok()?;
@@ -3035,8 +3084,10 @@ mod tests {
 
         assert_eq!(fs::read(&cached).unwrap(), b"executable");
         assert_eq!(fs::read(&cargo_executable).unwrap(), b"executable");
-        assert!(fs::symlink_metadata(&cargo_executable)
-            .is_ok_and(|metadata| !metadata.file_type().is_symlink()));
+        assert!(
+            fs::symlink_metadata(&cargo_executable)
+                .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+        );
         assert_eq!(
             fs::read(cached.parent().unwrap().join("assets/example.txt")).unwrap(),
             b"asset"

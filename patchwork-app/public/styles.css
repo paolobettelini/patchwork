@@ -2931,6 +2931,65 @@ input:focus {
   width: 100%;
 }
 
+.remote-cache-section fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.remote-cache-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 16px;
+  margin-block: 20px;
+}
+
+.remote-cache-fields select {
+  color-scheme: dark;
+  width: 100%;
+  min-height: 42px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface-strong);
+  font: inherit;
+}
+
+.remote-cache-fields select option {
+  color: var(--ink);
+  background-color: var(--surface-strong);
+}
+
+.app-shell[data-theme="dim-white"] .remote-cache-fields select,
+.app-shell[data-theme="bubblegum"] .remote-cache-fields select {
+  color-scheme: light;
+}
+
+.remote-cache-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.remote-cache-toggle input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  accent-color: var(--teal);
+}
+
+.remote-cache-advanced {
+  margin-block: 24px;
+  padding-block: 16px;
+  border-block: 1px solid var(--line);
+}
+
+.remote-cache-advanced summary { cursor: pointer; font-weight: 700; }
+
 .cache-actions {
   display: flex;
   flex-wrap: wrap;
