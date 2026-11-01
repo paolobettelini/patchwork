@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub(crate) enum AppTab {
     Home,
     Browse,
+    Servers,
     Upload,
     Project,
     Profile,
@@ -101,6 +102,8 @@ pub(crate) struct SelectedIconFile {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DependencyPage {
+    #[serde(default)]
+    pub(crate) profile_id: Option<String>,
     pub(crate) kind: String,
     pub(crate) id: String,
     pub(crate) name: String,
@@ -132,6 +135,46 @@ pub(crate) struct DependencyEntry {
     pub(crate) found: bool,
     pub(crate) ignored: bool,
     pub(crate) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileDependency {
+    #[serde(default)]
+    pub(crate) version: String,
+    #[serde(default)]
+    pub(crate) dependencies: Vec<String>,
+    #[serde(default)]
+    pub(crate) explicitly_ignored: bool,
+    #[serde(default)]
+    pub(crate) icon_data_url: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) found: bool,
+    pub(crate) ignored: bool,
+    pub(crate) local: bool,
+    #[serde(alias = "required_by")]
+    pub(crate) required_by: Vec<String>,
+    #[serde(default)]
+    pub(crate) toggle_blocked_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct DevelopmentConfig {
+    pub(crate) enabled: bool,
+    pub(crate) checkouts: Vec<DevelopmentLibrary>,
+    pub(crate) exclude: Vec<String>,
+    pub(crate) mods: BTreeMap<String, String>,
+    pub(crate) modpacks: BTreeMap<String, String>,
+    pub(crate) libraries: Vec<DevelopmentLibrary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct DevelopmentLibrary {
+    pub(crate) git: String,
+    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

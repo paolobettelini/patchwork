@@ -1,8 +1,9 @@
 use crate::model::{
-    DependencyPage, LauncherAuthStatus, LauncherCacheUsage, LauncherInstallResult, LauncherModpack,
-    LauncherSettings, PatchworkAuthEvent, PatchworkConsoleEvent, PatchworkTaskStatus,
-    ProfileOptions, ProfileOptionsView, PublicProfile, RegistryDownloadEvent,
-    RegistryInstallReport, SelectedIconFile,
+    DependencyPage, DevelopmentConfig, LauncherAuthStatus, LauncherCacheUsage,
+    LauncherInstallResult, LauncherModpack, LauncherSettings, PatchworkAuthEvent,
+    PatchworkConsoleEvent, PatchworkTaskStatus, ProfileDependency, ProfileOptions,
+    ProfileOptionsView, PublicProfile, RegistryDownloadEvent, RegistryInstallReport,
+    SelectedIconFile,
 };
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
@@ -62,6 +63,23 @@ pub(crate) async fn remote_cache_credentials_status() -> Result<bool, JsValue> {
 
 pub(crate) async fn select_folder() -> Result<Option<String>, JsValue> {
     invoke("select_folder", &()).await
+}
+
+pub(crate) async fn select_development_modpack_file() -> Result<Option<String>, JsValue> {
+    invoke("select_development_modpack_file", &()).await
+}
+
+pub(crate) async fn discover_development_checkout(
+    profile_id: &str,
+    path: &str,
+) -> Result<crate::model::DevelopmentConfig, JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        profile_id: &'a str,
+        path: &'a str,
+    }
+    invoke("discover_development_checkout", &Args { profile_id, path }).await
 }
 
 pub(crate) async fn select_settings_file() -> Result<Option<String>, JsValue> {
@@ -446,6 +464,66 @@ pub(crate) async fn toggle_profile_ignore(
     }
 
     invoke("toggle_profile_ignore", &Args { profile_id, mod_id }).await
+}
+
+pub(crate) async fn load_dependency_page_for_profile(
+    kind: &str,
+    id: &str,
+    profile_id: &str,
+) -> Result<DependencyPage, JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        kind: &'a str,
+        id: &'a str,
+        profile_id: &'a str,
+    }
+    invoke(
+        "load_dependency_page",
+        &Args {
+            kind,
+            id,
+            profile_id,
+        },
+    )
+    .await
+}
+
+pub(crate) async fn load_profile_dependencies(
+    profile_id: &str,
+) -> Result<Vec<ProfileDependency>, JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        profile_id: &'a str,
+    }
+    invoke("load_profile_dependencies", &Args { profile_id }).await
+}
+
+pub(crate) async fn load_profile_development(
+    profile_id: &str,
+) -> Result<DevelopmentConfig, JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        profile_id: &'a str,
+    }
+    invoke("load_profile_development", &Args { profile_id }).await
+}
+
+// Saves the local sidecar. The backend adds only new mod override IDs not already
+// reachable through nested dependencies; removing an override keeps root references.
+pub(crate) async fn update_profile_development(
+    profile_id: &str,
+    config: DevelopmentConfig,
+) -> Result<(), JsValue> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args<'a> {
+        profile_id: &'a str,
+        config: DevelopmentConfig,
+    }
+    invoke("update_profile_development", &Args { profile_id, config }).await
 }
 
 pub(crate) async fn patchwork_task_status(

@@ -138,8 +138,10 @@ format, providers, modpacks, codegen, assets, and favicons.
 
 Dependencies between selected Patchwork mods should use sibling Cargo paths so
 Compose and domain codegen can inspect their manifests. Plain helper libraries
-should use a distributable Git or registry source; local development can patch
-that source back to the checkout with `.cargo/config.toml`. Generated crates
+should use a distributable Git or registry source. Per-profile **Local development**
+links mods and library checkouts without changing global cache paths or maintaining
+Cargo patch files manually; the CLI accepts the same mappings with `--development`.
+See [Local development](documentation/src/local_development.md). Generated crates
 preserve these library sources instead of requiring every dependency to be a
 downloaded Patchwork mod. See [Mods and Cargo metadata](documentation/src/mods.md)
 and [Generic codegen](documentation/src/codegen.md).

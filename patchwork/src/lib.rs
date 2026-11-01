@@ -2,6 +2,7 @@ use std::{io::Write, path::Path};
 
 mod browser;
 mod codegen;
+pub mod development;
 mod error;
 mod graph;
 mod model;
@@ -12,7 +13,12 @@ mod registry;
 
 pub use browser::{
     DependencyDiagnostic, DependencyEntry, DependencyPage, DependencyPageKind, DependencyTarget,
-    inspect_dependency_page,
+    ProfileDependency, inspect_dependency_page, inspect_dependency_page_with_sources,
+    inspect_profile_dependencies, inspect_profile_dependencies_with_sources,
+};
+pub use development::{
+    DevelopmentCheckout, DevelopmentConfig, DevelopmentLibrarySource, PreparedDevelopment,
+    prepare_development, prepare_development_for_modpack,
 };
 pub use error::{PatchworkError, Result};
 pub use model::{

@@ -2,8 +2,9 @@ use crate::error::{PatchworkError, Result};
 use crate::graph;
 use crate::model::{CargoManifest, Dependencies, ModInfo, Modpack};
 use crate::modpacks;
+use crate::modpacks::SourcePaths;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,23 @@ pub struct DependencyDiagnostic {
     pub message: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileDependency {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub found: bool,
+    pub ignored: bool,
+    pub local: bool,
+    pub required_by: Vec<String>,
+    pub toggle_blocked_reason: Option<String>,
+    pub version: String,
+    pub dependencies: Vec<String>,
+    pub explicitly_ignored: bool,
+    pub icon_data_url: Option<String>,
+}
+
 #[derive(Debug)]
 struct ModpackDocument {
     id: String,
@@ -75,30 +93,237 @@ struct DependencyRef {
     id: String,
 }
 
+/// Inspect the full dependency graph, retaining excluded and missing entries.
+pub fn inspect_profile_dependencies(
+    root_modpack: &Path,
+    mods_folder: &Path,
+    modpacks_folder: &Path,
+) -> Result<Vec<ProfileDependency>> {
+    inspect_profile_dependencies_with_sources(
+        root_modpack,
+        mods_folder,
+        modpacks_folder,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+}
+
+/// Local mod values are crate directories; local modpack values are TOML files.
+pub fn inspect_profile_dependencies_with_sources(
+    root_modpack: &Path,
+    mods_folder: &Path,
+    modpacks_folder: &Path,
+    mods: &BTreeMap<String, PathBuf>,
+    modpacks: &BTreeMap<String, PathBuf>,
+) -> Result<Vec<ProfileDependency>> {
+    let sources = SourcePaths {
+        mods_folder,
+        modpacks_folder,
+        mods,
+        modpacks,
+    };
+    let root = read_modpack_document_from_path(root_modpack)?;
+    let root_ref = format!("{MODPACK_PREFIX}{}", root.id);
+    let roots = explicit_refs_for_modpack(&root.modpack);
+    let mut ignored = root.modpack.ignore.iter().cloned().collect::<HashSet<_>>();
+    let mut pending = roots
+        .iter()
+        .cloned()
+        .map(|dep| (Some(root_ref.clone()), dep))
+        .collect::<VecDeque<_>>();
+    pending.extend(
+        root.modpack
+            .ignore
+            .iter()
+            .map(|id| (None, parse_dependency_ref(id))),
+    );
+    let mut indexes = HashMap::<DependencyRef, usize>::new();
+    let mut entries = Vec::<ProfileDependency>::new();
+    let mut children = HashMap::<DependencyRef, Vec<DependencyRef>>::new();
+    let mut exclusions = HashMap::<DependencyRef, Vec<String>>::new();
+
+    while let Some((parent, dep)) = pending.pop_front() {
+        if let Some(&index) = indexes.get(&dep) {
+            if let Some(parent) = parent {
+                if !entries[index].required_by.contains(&parent) {
+                    entries[index].required_by.push(parent);
+                }
+            }
+            continue;
+        }
+        let (entry, refs, ignores, local) = match dep.kind {
+            DependencyRefKind::Modpack => {
+                let document = sources
+                    .modpack_path(&dep.id)
+                    .ok()
+                    .and_then(|path| read_modpack_document_from_path(&path).ok());
+                let (refs, ignores) = document
+                    .as_ref()
+                    .map(|document| {
+                        (
+                            explicit_refs_for_modpack(&document.modpack),
+                            document.modpack.ignore.clone(),
+                        )
+                    })
+                    .unwrap_or_default();
+                (
+                    modpack_entry(&dep.id, &sources, false),
+                    refs,
+                    ignores,
+                    modpacks.contains_key(&dep.id),
+                )
+            }
+            DependencyRefKind::Mod => {
+                let refs = read_mod_summary(&dep.id, &sources)
+                    .ok()
+                    .map(|summary| refs_for_mod(&summary.info))
+                    .unwrap_or_default();
+                (
+                    mod_entry(&dep.id, &sources, false),
+                    refs,
+                    Vec::new(),
+                    mods.contains_key(&dep.id),
+                )
+            }
+        };
+        indexes.insert(dep.clone(), entries.len());
+        entries.push(ProfileDependency {
+            version: match dep.kind {
+                DependencyRefKind::Mod => read_mod_summary(&dep.id, &sources)
+                    .map(|s| s.version)
+                    .unwrap_or_default(),
+                DependencyRefKind::Modpack => sources
+                    .modpack_path(&dep.id)
+                    .ok()
+                    .and_then(|p| read_modpack_document_from_path(&p).ok())
+                    .map(|d| d.modpack.version)
+                    .unwrap_or_default(),
+            },
+            dependencies: refs.iter().map(format_dependency_ref).collect(),
+            explicitly_ignored: root.modpack.ignore.contains(&format_dependency_ref(&dep)),
+            icon_data_url: None,
+            id: dep.id.clone(),
+            name: entry.name,
+            kind: match dep.kind {
+                DependencyRefKind::Mod => "mod",
+                DependencyRefKind::Modpack => "modpack",
+            }
+            .to_owned(),
+            found: entry.found,
+            ignored: false,
+            local,
+            required_by: parent.into_iter().collect(),
+            toggle_blocked_reason: None,
+        });
+        pending.extend(
+            refs.iter()
+                .cloned()
+                .map(|child| (Some(format_dependency_ref(&dep)), child)),
+        );
+        pending.extend(ignores.iter().map(|id| (None, parse_dependency_ref(id))));
+        children.insert(dep.clone(), refs);
+        exclusions.insert(dep, ignores);
+    }
+
+    // Only active packs contribute exclusions. A second path can keep a shared mod active.
+    let root_ignored = ignored.clone();
+    let mut states = HashSet::new();
+    let active = loop {
+        let previous = ignored.clone();
+        let mut key = previous.iter().cloned().collect::<Vec<_>>();
+        key.sort();
+        if !states.insert(key) {
+            return Err(PatchworkError::InvalidModpackMetadata {
+                id: root.id.clone(),
+                manifest_path: root_modpack.to_path_buf(),
+                reason: "cyclic modpack exclusions; remove one of the conflicting exclusions"
+                    .into(),
+            });
+        }
+        let mut discovered = root_ignored.clone();
+        let mut active = HashSet::new();
+        let mut pending = roots.clone();
+        while let Some(dep) = pending.pop() {
+            if ignored.contains(&format_dependency_ref(&dep)) || !active.insert(dep.clone()) {
+                continue;
+            }
+            if let Some(excludes) = exclusions.get(&dep) {
+                discovered.extend(excludes.iter().cloned());
+                ignored.extend(excludes.iter().cloned());
+            }
+            if let Some(refs) = children.get(&dep) {
+                pending.extend(refs.iter().cloned());
+            }
+        }
+        if previous == discovered {
+            break active;
+        }
+        ignored = discovered;
+    };
+    for (dep, index) in indexes {
+        entries[index].ignored =
+            ignored.contains(&format_dependency_ref(&dep)) || !active.contains(&dep);
+        if entries[index].ignored && !root_ignored.contains(&format_dependency_ref(&dep)) {
+            entries[index].toggle_blocked_reason = Some(
+                if ignored.contains(&format_dependency_ref(&dep)) {
+                    "Excluded by an imported modpack. Change that modpack's exclusion or disable the importing modpack.".into()
+                } else {
+                    "Inactive because its parent dependency is disabled. Enable the parent first."
+                        .into()
+                },
+            );
+        }
+        entries[index].required_by.sort();
+    }
+    Ok(entries)
+}
+
 pub fn inspect_dependency_page(
     target: DependencyTarget<'_>,
     mods_folder: &Path,
     modpacks_folder: &Path,
     profiles_folder: &Path,
 ) -> Result<DependencyPage> {
+    inspect_dependency_page_with_sources(
+        target,
+        mods_folder,
+        modpacks_folder,
+        profiles_folder,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+}
+
+pub fn inspect_dependency_page_with_sources(
+    target: DependencyTarget<'_>,
+    mods_folder: &Path,
+    modpacks_folder: &Path,
+    profiles_folder: &Path,
+    local_mods: &BTreeMap<String, PathBuf>,
+    local_modpacks: &BTreeMap<String, PathBuf>,
+) -> Result<DependencyPage> {
+    let sources = SourcePaths {
+        mods_folder,
+        modpacks_folder,
+        mods: local_mods,
+        modpacks: local_modpacks,
+    };
     match target {
         DependencyTarget::Profile { id } => inspect_modpack_page(
             DependencyPageKind::Profile,
             id,
             profiles_folder,
-            mods_folder,
-            modpacks_folder,
+            &sources,
             true,
         ),
         DependencyTarget::Modpack { id } => inspect_modpack_page(
             DependencyPageKind::Modpack,
             id,
             modpacks_folder,
-            mods_folder,
-            modpacks_folder,
+            &sources,
             false,
         ),
-        DependencyTarget::Mod { id } => inspect_mod_page(id, mods_folder, modpacks_folder),
+        DependencyTarget::Mod { id } => inspect_mod_page(id, &sources),
     }
 }
 
@@ -106,11 +331,14 @@ fn inspect_modpack_page(
     kind: DependencyPageKind,
     id: &str,
     source_folder: &Path,
-    mods_folder: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
     editable_profile: bool,
 ) -> Result<DependencyPage> {
-    let document = read_modpack_document(source_folder, id)?;
+    let document = if kind == DependencyPageKind::Modpack {
+        read_modpack_document_from_path(&sources.modpack_path(id)?)?
+    } else {
+        read_modpack_document(source_folder, id)?
+    };
     let ignored = document
         .modpack
         .ignore
@@ -119,24 +347,29 @@ fn inspect_modpack_page(
         .collect::<HashSet<_>>();
     let explicit = explicit_refs_for_modpack(&document.modpack);
 
-    let mut diagnostics = validate_modpack_graph(&document.path, mods_folder, modpacks_folder);
-    let distinct_dependency_count =
-        collect_distinct_count(&explicit, mods_folder, modpacks_folder, &mut diagnostics);
+    let mut diagnostics = validate_modpack_graph(&document.path, sources);
+    let distinct_dependency_count = collect_distinct_count(&explicit, sources, &mut diagnostics);
 
     let modpacks = explicit
         .iter()
         .filter(|dep| dep.kind == DependencyRefKind::Modpack)
-        .map(|dep| modpack_entry(&dep.id, modpacks_folder, false))
+        .map(|dep| {
+            modpack_entry(
+                &dep.id,
+                sources,
+                ignored.contains(&format_dependency_ref(dep)),
+            )
+        })
         .collect();
     let mods = explicit
         .iter()
         .filter(|dep| dep.kind == DependencyRefKind::Mod)
-        .map(|dep| mod_entry(&dep.id, mods_folder, ignored.contains(&dep.id)))
+        .map(|dep| mod_entry(&dep.id, sources, ignored.contains(&dep.id)))
         .collect();
 
     Ok(DependencyPage {
         kind,
-        id: document.id,
+        id: id.to_owned(),
         name: non_empty_or(&document.modpack.name, id),
         description: non_empty_or(
             &document.modpack.description,
@@ -151,27 +384,21 @@ fn inspect_modpack_page(
     })
 }
 
-fn inspect_mod_page(
-    id: &str,
-    mods_folder: &Path,
-    modpacks_folder: &Path,
-) -> Result<DependencyPage> {
-    let summary = read_mod_summary(id, mods_folder)?;
-    let explicit = explicit_refs_for_mod(&summary.info.dependencies);
-    let mut diagnostics =
-        validate_mod_dependencies(id, &summary.info, mods_folder, modpacks_folder);
-    let distinct_dependency_count =
-        collect_distinct_count(&explicit, mods_folder, modpacks_folder, &mut diagnostics);
+fn inspect_mod_page(id: &str, sources: &SourcePaths<'_>) -> Result<DependencyPage> {
+    let summary = read_mod_summary(id, sources)?;
+    let explicit = refs_for_mod(&summary.info);
+    let mut diagnostics = validate_mod_dependencies(id, &summary.info, sources);
+    let distinct_dependency_count = collect_distinct_count(&explicit, sources, &mut diagnostics);
 
     let modpacks = explicit
         .iter()
         .filter(|dep| dep.kind == DependencyRefKind::Modpack)
-        .map(|dep| modpack_entry(&dep.id, modpacks_folder, false))
+        .map(|dep| modpack_entry(&dep.id, sources, false))
         .collect();
     let mods = explicit
         .iter()
         .filter(|dep| dep.kind == DependencyRefKind::Mod)
-        .map(|dep| mod_entry(&dep.id, mods_folder, false))
+        .map(|dep| mod_entry(&dep.id, sources, false))
         .collect();
 
     Ok(DependencyPage {
@@ -190,10 +417,9 @@ fn inspect_mod_page(
 
 fn validate_modpack_graph(
     root_path: &Path,
-    mods_folder: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
 ) -> Vec<DependencyDiagnostic> {
-    match modpacks::load_mods(root_path, mods_folder, modpacks_folder)
+    match modpacks::load_mods_with_sources(root_path, sources)
         .and_then(|loaded| graph::resolve(loaded.mods).map(|_| ()))
     {
         Ok(()) => Vec::new(),
@@ -204,11 +430,10 @@ fn validate_modpack_graph(
 fn validate_mod_dependencies(
     mod_id: &str,
     info: &ModInfo,
-    mods_folder: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
 ) -> Vec<DependencyDiagnostic> {
     let mut diagnostics = Vec::new();
-    for dep in explicit_refs_for_mod(&info.dependencies) {
+    for dep in refs_for_mod(info) {
         match dep.kind {
             DependencyRefKind::Modpack => {
                 if dep.id == mod_id {
@@ -217,7 +442,7 @@ fn validate_mod_dependencies(
                         message: format!("mod '{mod_id}' references itself as a modpack"),
                     });
                 }
-                if find_modpack_path(&dep.id, modpacks_folder).is_none() {
+                if sources.modpack_path(&dep.id).is_err() {
                     diagnostics.push(DependencyDiagnostic {
                         kind: "modpack_not_found".to_string(),
                         message: format!(
@@ -232,8 +457,8 @@ fn validate_mod_dependencies(
                     diagnostics.push(diagnostic_from_error(PatchworkError::SelfDependency {
                         mod_name: mod_id.to_string(),
                     }));
-                } else if !mod_manifest_path(mods_folder, &dep.id).is_file()
-                    && provider_for_dependency(mods_folder, &dep.id).is_none()
+                } else if !sources.mod_manifest(&dep.id).is_file()
+                    && provider_for_dependency(sources, &dep.id).is_none()
                 {
                     diagnostics.push(diagnostic_from_error(PatchworkError::MissingDependency {
                         dependent_mod: mod_id.to_string(),
@@ -248,29 +473,20 @@ fn validate_mod_dependencies(
 
 fn collect_distinct_count(
     roots: &[DependencyRef],
-    mods_folder: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
     diagnostics: &mut Vec<DependencyDiagnostic>,
 ) -> usize {
     let mut seen = HashSet::new();
     let mut visiting = Vec::new();
     for dep in roots {
-        collect_dependency_ref(
-            dep,
-            mods_folder,
-            modpacks_folder,
-            &mut seen,
-            &mut visiting,
-            diagnostics,
-        );
+        collect_dependency_ref(dep, sources, &mut seen, &mut visiting, diagnostics);
     }
     seen.len()
 }
 
 fn collect_dependency_ref(
     dep: &DependencyRef,
-    mods_folder: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
     seen: &mut HashSet<DependencyRef>,
     visiting: &mut Vec<DependencyRef>,
     diagnostics: &mut Vec<DependencyDiagnostic>,
@@ -298,18 +514,11 @@ fn collect_dependency_ref(
     visiting.push(dep.clone());
     match dep.kind {
         DependencyRefKind::Modpack => {
-            if let Some(path) = find_modpack_path(&dep.id, modpacks_folder) {
+            if let Ok(path) = sources.modpack_path(&dep.id) {
                 match read_modpack_document_from_path(&path) {
                     Ok(document) => {
                         for child in explicit_refs_for_modpack(&document.modpack) {
-                            collect_dependency_ref(
-                                &child,
-                                mods_folder,
-                                modpacks_folder,
-                                seen,
-                                visiting,
-                                diagnostics,
-                            );
+                            collect_dependency_ref(&child, sources, seen, visiting, diagnostics);
                         }
                     }
                     Err(error) => diagnostics.push(diagnostic_from_error(error)),
@@ -317,16 +526,9 @@ fn collect_dependency_ref(
             }
         }
         DependencyRefKind::Mod => {
-            if let Ok(summary) = read_mod_summary(&dep.id, mods_folder) {
-                for child in explicit_refs_for_mod(&summary.info.dependencies) {
-                    collect_dependency_ref(
-                        &child,
-                        mods_folder,
-                        modpacks_folder,
-                        seen,
-                        visiting,
-                        diagnostics,
-                    );
+            if let Ok(summary) = read_mod_summary(&dep.id, sources) {
+                for child in refs_for_mod(&summary.info) {
+                    collect_dependency_ref(&child, sources, seen, visiting, diagnostics);
                 }
             }
         }
@@ -357,6 +559,14 @@ fn explicit_refs_for_mod(dependencies: &Dependencies) -> Vec<DependencyRef> {
     dedup_refs(refs)
 }
 
+fn refs_for_mod(info: &ModInfo) -> Vec<DependencyRef> {
+    let mut refs = explicit_refs_for_mod(&info.dependencies);
+    if let Some(api) = &info.provides {
+        refs.push(parse_dependency_ref(api));
+    }
+    dedup_refs(refs)
+}
+
 fn parse_dependency_ref(dependency: &str) -> DependencyRef {
     if let Some(id) = dependency.strip_prefix(MODPACK_PREFIX) {
         DependencyRef {
@@ -371,8 +581,10 @@ fn parse_dependency_ref(dependency: &str) -> DependencyRef {
     }
 }
 
-fn modpack_entry(id: &str, modpacks_folder: &Path, ignored: bool) -> DependencyEntry {
-    match find_modpack_path(id, modpacks_folder)
+fn modpack_entry(id: &str, sources: &SourcePaths<'_>, ignored: bool) -> DependencyEntry {
+    match sources
+        .modpack_path(id)
+        .ok()
         .and_then(|path| read_modpack_document_from_path(&path).ok())
     {
         Some(document) => DependencyEntry {
@@ -392,8 +604,8 @@ fn modpack_entry(id: &str, modpacks_folder: &Path, ignored: bool) -> DependencyE
     }
 }
 
-fn mod_entry(id: &str, mods_folder: &Path, ignored: bool) -> DependencyEntry {
-    match read_mod_summary(id, mods_folder) {
+fn mod_entry(id: &str, sources: &SourcePaths<'_>, ignored: bool) -> DependencyEntry {
+    match read_mod_summary(id, sources) {
         Ok(summary) => DependencyEntry {
             id: id.to_string(),
             name: summary.name,
@@ -417,8 +629,8 @@ struct ModSummary {
     info: ModInfo,
 }
 
-fn read_mod_summary(id: &str, mods_folder: &Path) -> Result<ModSummary> {
-    let manifest_path = mod_manifest_path(mods_folder, id);
+fn read_mod_summary(id: &str, sources: &SourcePaths<'_>) -> Result<ModSummary> {
+    let manifest_path = sources.mod_manifest(id);
     if !manifest_path.exists() {
         return Err(PatchworkError::MissingModManifest {
             mod_name: id.to_string(),
@@ -490,14 +702,18 @@ fn local_package_version(document: &toml::Value, manifest_path: &Path) -> Option
     None
 }
 
-fn provider_for_dependency(mods_folder: &Path, dependency: &str) -> Option<String> {
-    let entries = fs::read_dir(mods_folder).ok()?;
-    for entry in entries.flatten() {
-        if !entry.file_type().ok()?.is_dir() {
-            continue;
-        }
-        let id = entry.file_name().to_string_lossy().to_string();
-        if let Ok(summary) = read_mod_summary(&id, mods_folder) {
+fn provider_for_dependency(sources: &SourcePaths<'_>, dependency: &str) -> Option<String> {
+    let mut ids = sources.mods.keys().cloned().collect::<HashSet<_>>();
+    if let Ok(entries) = fs::read_dir(sources.mods_folder) {
+        ids.extend(
+            entries
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned()),
+        );
+    }
+    for id in ids {
+        if let Ok(summary) = read_mod_summary(&id, sources) {
             if summary.info.provides.as_deref() == Some(dependency) {
                 return Some(id);
             }
@@ -532,20 +748,6 @@ fn read_modpack_document_from_path(path: &Path) -> Result<ModpackDocument> {
         path: path.to_path_buf(),
         modpack,
     })
-}
-
-fn find_modpack_path(id: &str, modpacks_folder: &Path) -> Option<PathBuf> {
-    let candidate = modpacks_folder.join(id);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-
-    let candidate = modpacks_folder.join(format!("{id}.toml"));
-    candidate.is_file().then_some(candidate)
-}
-
-fn mod_manifest_path(mods_folder: &Path, id: &str) -> PathBuf {
-    mods_folder.join(id).join("Cargo.toml")
 }
 
 fn format_dependency_ref(dep: &DependencyRef) -> String {

@@ -36,7 +36,7 @@ Supported generic fields:
 - `color`: optional color used by the launcher when the modpack is selected;
 - `modpacks`: other modpacks to import;
 - `mods`: explicitly selected mods;
-- `ignore`: mods to remove from the imported tree;
+- `ignore`: mod IDs, or `modpack/<id>` references, to exclude from the imported tree;
 - `options`: optional per-profile process environment and arguments used by the
   desktop launcher.
 
@@ -144,6 +144,16 @@ mods = [
 If a removed mod is still directly required by another mod, Patchwork fails with
 a structured missing dependency error. If the dependency is expressed through an
 API, another selected provider can satisfy it.
+
+To exclude an imported modpack at any depth, use `ignore = ["modpack/optional-pack"]`.
+This suppresses that pack's inclusion, not every mod it happens to contain: a mod
+selected independently through another pack or required by another mod remains
+selected. Exclusions are profile-wide, not attached to a single visual occurrence
+of a dependency. The launcher exposes nested exclusions through its searchable
+Dependencies list.
+
+Local development paths are deliberately not part of this distributable format.
+See [Local development](./local_development.md) for per-profile local overrides.
 
 ## Client and server
 

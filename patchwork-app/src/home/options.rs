@@ -36,21 +36,39 @@ pub(super) fn OptionsPanel(
     let (saving, set_saving) = signal(false);
     let (error, set_error) = signal(None::<String>);
     let (notice, set_notice) = signal(None::<String>);
-
-    Effect::new(move |_| {
-        let Some(profile_id) = page
-            .get()
+    let profile = Memo::new(move |_| {
+        page.get()
             .filter(|page| page.editable_profile)
             .map(|page| page.id)
-        else {
-            return;
-        };
+    });
+    let generation = RwSignal::new(0_u64);
+    let loaded = RwSignal::new(false);
+    on_cleanup(move || {
+        generation.try_update(|value| *value += 1);
+    });
+
+    Effect::new(move |_| {
+        let profile_id = profile.get();
         let mode = build_mode.get();
+        generation.update(|value| *value += 1);
+        let request = generation.get_untracked();
+        loaded.set(false);
         set_loading.set(true);
+        set_saving.set(false);
         set_error.set(None);
         set_notice.set(None);
+        let Some(profile_id) = profile_id else {
+            return;
+        };
         leptos::task::spawn_local(async move {
-            match load_profile_options(&profile_id, mode).await {
+            let result = load_profile_options(&profile_id, mode).await;
+            if generation.try_get_untracked() != Some(request)
+                || profile.try_get_untracked().flatten().as_deref() != Some(&profile_id)
+                || build_mode.try_get_untracked() != Some(mode)
+            {
+                return;
+            }
+            match result {
                 Ok(view) => {
                     let mut id = 0_u32;
                     set_build_env.set(environment_rows(view.options.build.env, &mut id));
@@ -59,6 +77,7 @@ pub(super) fn OptionsPanel(
                     set_run_args.set(argument_rows(view.options.run.args, &mut id));
                     set_defaults.set(view.defaults);
                     set_next_id.set(id);
+                    loaded.set(true);
                 }
                 Err(value) => set_error.set(Some(js_error_to_string(value))),
             }
@@ -67,6 +86,9 @@ pub(super) fn OptionsPanel(
     });
 
     let save = move |_| {
+        if loading.get_untracked() || saving.get_untracked() || !loaded.get_untracked() {
+            return;
+        }
         let Some(profile_id) = page
             .get()
             .filter(|page| page.editable_profile)
@@ -84,8 +106,15 @@ pub(super) fn OptionsPanel(
         set_saving.set(true);
         set_error.set(None);
         set_notice.set(None);
+        let request = generation.get_untracked();
         leptos::task::spawn_local(async move {
-            match update_profile_options(&profile_id, options).await {
+            let result = update_profile_options(&profile_id, options).await;
+            if generation.try_get_untracked() != Some(request)
+                || profile.try_get_untracked().flatten().as_deref() != Some(&profile_id)
+            {
+                return;
+            }
+            match result {
                 Ok(()) => set_notice.set(Some("Profile options saved.".to_owned())),
                 Err(value) => set_error.set(Some(js_error_to_string(value))),
             }
@@ -103,7 +132,7 @@ pub(super) fn OptionsPanel(
                 <button
                     type="button"
                     class="secondary-action options-save-action"
-                    disabled=move || loading.get() || saving.get()
+                    disabled=move || loading.get() || saving.get() || !loaded.get()
                     on:click=save
                 >
                     {move || if saving.get() { "Saving..." } else { "Save options" }}

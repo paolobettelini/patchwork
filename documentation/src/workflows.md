@@ -78,14 +78,12 @@ This matters for registry installations: Patchwork downloads normal, API, and
 support mods, but Cargo must be able to fetch helper libraries that are not
 Patchwork projects.
 
-For a desktop development profile, a practical setup is:
-
-1. Set the mod and modpack caches to your local development mods/modpacks folder `/home/local/...`.
-2. Add `/some/local`, or the appropriate checkout root, to **Registries / Local
-   folders** so Browse resolves development projects locally before the remote
-   registry.
-3. Open the profile's **Options** tab and add one compilation argument row:
-   `--config /some/local/mods/.cargo/config.toml`.
+For a desktop development profile, use the **Local development** tab.
+Keep the normal cache directories; connect local mod directories and, optionally,
+Git-source library checkouts for that profile. Patchwork prepares the mixed source
+tree and Cargo overrides automatically. Other profiles continue using their own
+sources. See [Local development](./local_development.md) for the CLI equivalent,
+configuration format, dependency exclusions and migration instructions.
 
 Patchwork mods are downloaded and composed as complete crate directories, but
 ordinary Rust libraries are not Patchwork registry projects and are not
@@ -93,6 +91,8 @@ downloaded together with the mods. Their distributable `Cargo.toml`
 dependencies should therefore use a Git address. During local development it
 is useful to keep using the adjacent library checkout instead.
 
+The old helper is optional for standalone Cargo workflows or manifest maintenance;
+it is no longer needed to generate launcher development overrides.
 For a Modularis checkout, copy
 [`scripts/sync-modularis-deps.sh`](../../scripts/sync-modularis-deps.sh) into
 `mods/.cargo/` and run it there:

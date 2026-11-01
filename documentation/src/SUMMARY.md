@@ -19,6 +19,7 @@
 # Applications and services
 
 - [Desktop launcher](./desktop_launcher.md)
+- [Local development](./local_development.md)
 - [Remote compilation cache](./remote_cache.md)
 - [Web service](./web_service.md)
 - [Accounts and authentication](./authentication.md)

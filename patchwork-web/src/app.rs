@@ -12,10 +12,9 @@ use leptos::prelude::*;
 use patchwork_registry_types::{
     RegistryAddToProfileRequest, RegistryBrowseProject, RegistryBrowseRequest,
     RegistryBrowseResponse, RegistryDependencyGraph, RegistryProfileOption, RegistryProjectDetails,
-    RegistryProjectKind,
-    RegistryProjectRef, RegistryPublishRequest, RegistryPublishResponse, RegistryScan,
-    RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress, RegistryScanRequest,
-    is_generated_mod_id,
+    RegistryProjectKind, RegistryProjectRef, RegistryPublishRequest, RegistryPublishResponse,
+    RegistryScan, RegistryScanJobStarted, RegistryScanPhase, RegistryScanProgress,
+    RegistryScanRequest, is_generated_mod_id,
 };
 use patchwork_ui::{
     ArrowRightToBracketIcon, BrowsePage, GithubIcon, HomeIcon, ProfilePage, PublishedProject,
@@ -30,6 +29,7 @@ const THEME_STORAGE_KEY: &str = "patchwork-theme";
 enum WebPage {
     Home,
     Browse,
+    Servers,
     Upload,
     Profile,
     Project,
@@ -290,6 +290,7 @@ pub(crate) fn WebApp() -> impl IntoView {
                             on_add_to_profile=Callback::new(|_: RegistryAddToProfileRequest| {})
                         />
                     }.into_any(),
+                    WebPage::Servers => view! { <main class="catalog-page" aria-label="Servers"></main> }.into_any(),
                     WebPage::Upload => view! {
                         <UploadPage
                             authenticated=Signal::derive(move || profile.get().is_some())
@@ -385,6 +386,7 @@ fn TopBar(
                     <SearchIcon />
                     <span>"Browse"</span>
                 </a>
+                <a class=top_tab_class(active_page == WebPage::Servers) href=app_url("/servers")><patchwork_ui::icons::ServersIcon /><span>"Servers"</span></a>
                 <a class=top_tab_class(active_page == WebPage::Upload) href=app_url("/upload")>
                     <UploadIcon />
                     <span>"Upload"</span>
@@ -1095,6 +1097,7 @@ fn current_page() -> WebPage {
     match path.as_str() {
         "/" => WebPage::Home,
         "/browse" => WebPage::Browse,
+        "/servers" => WebPage::Servers,
         "/upload" => WebPage::Upload,
         "/profile" => WebPage::Profile,
         _ if current_profile_nickname().is_some() => WebPage::Profile,

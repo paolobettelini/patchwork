@@ -1,6 +1,6 @@
 use crate::error::{PatchworkError, Result};
 use crate::model::{CargoManifest, Dependencies, ModInfo, Modpack, is_generated_mod_id};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,46 @@ pub struct LoadedMods {
 #[derive(Default)]
 struct ModpackSelection {
     mods: Vec<String>,
-    ignore: HashSet<String>,
+}
+
+struct Exclusions {
+    effective: HashSet<String>,
+    discovered: HashSet<String>,
+}
+
+impl Exclusions {
+    fn contains(&self, id: &str) -> bool {
+        self.effective.contains(id)
+    }
+    fn insert(&mut self, id: String) {
+        self.discovered.insert(id.clone());
+        self.effective.insert(id);
+    }
+}
+
+pub(crate) struct SourcePaths<'a> {
+    pub mods_folder: &'a Path,
+    pub modpacks_folder: &'a Path,
+    pub mods: &'a BTreeMap<String, PathBuf>,
+    pub modpacks: &'a BTreeMap<String, PathBuf>,
+}
+
+impl SourcePaths<'_> {
+    pub fn mod_manifest(&self, id: &str) -> PathBuf {
+        self.mods
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| self.mods_folder.join(id))
+            .join("Cargo.toml")
+    }
+
+    pub fn modpack_path(&self, id: &str) -> Result<PathBuf> {
+        validate_modpack_id(id)?;
+        match self.modpacks.get(id) {
+            Some(path) => Ok(path.clone()),
+            None => resolve_modpack_id(id, self.modpacks_folder),
+        }
+    }
 }
 
 pub fn resolve_modpack_path(modpack: &Path, modpacks_folder: &Path) -> Result<PathBuf> {
@@ -37,8 +76,54 @@ pub fn load_mods(
     mods_folder: &Path,
     modpacks_folder: &Path,
 ) -> Result<LoadedMods> {
-    let selection = collect_modpack_selection(root_modpack, modpacks_folder)?;
-    let mut ignored = selection.ignore;
+    load_mods_with_sources(
+        root_modpack,
+        &SourcePaths {
+            mods_folder,
+            modpacks_folder,
+            mods: &BTreeMap::new(),
+            modpacks: &BTreeMap::new(),
+        },
+    )
+}
+
+pub(crate) fn load_mods_with_sources(
+    root_modpack: &Path,
+    sources: &SourcePaths<'_>,
+) -> Result<LoadedMods> {
+    let mut previous = HashSet::new();
+    let mut seen = HashSet::new();
+    loop {
+        let mut key = previous.iter().cloned().collect::<Vec<String>>();
+        key.sort();
+        if !seen.insert(key) {
+            return Err(PatchworkError::InvalidModpackMetadata {
+                id: root_modpack.display().to_string(),
+                manifest_path: root_modpack.to_path_buf(),
+                reason:
+                    "cyclic exclusions: active modpacks disagree about which modpacks are enabled"
+                        .into(),
+            });
+        }
+        let mut ignored = Exclusions {
+            effective: previous.clone(),
+            discovered: HashSet::new(),
+        };
+        let result = load_selection(root_modpack, sources, &mut ignored);
+        // Re-evaluate from active inputs so an excluded pack cannot leave stale exclusions.
+        if ignored.discovered == previous {
+            return result;
+        }
+        previous = ignored.discovered;
+    }
+}
+
+fn load_selection(
+    root_modpack: &Path,
+    sources: &SourcePaths<'_>,
+    ignored: &mut Exclusions,
+) -> Result<LoadedMods> {
+    let selection = collect_modpack_selection(root_modpack, sources, ignored)?;
     let mut selected = dedup(
         selection
             .mods
@@ -61,11 +146,24 @@ pub fn load_mods(
             continue;
         }
 
-        let mut mod_info = read_mod_info(mods_folder, &mod_name)?;
+        let mut mod_info = read_mod_info(sources, &mod_name)?;
+        if let Some(dependency) = mod_info
+            .dependencies
+            .init
+            .iter()
+            .chain(&mod_info.dependencies.run)
+            .chain(&mod_info.dependencies.ownership)
+            .find(|id| id.starts_with(MODPACK_PREFIX) && ignored.contains(id))
+        {
+            return Err(PatchworkError::MissingDependency {
+                dependent_mod: mod_name,
+                dependency: dependency.clone(),
+            });
+        }
         expand_dependencies(
             &mut mod_info.dependencies,
-            modpacks_folder,
-            &mut ignored,
+            sources,
+            ignored,
             &mut selected,
             &mut selected_set,
         )?;
@@ -80,17 +178,19 @@ pub fn load_mods(
 
 fn collect_modpack_selection(
     root_modpack: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
+    ignored: &mut Exclusions,
 ) -> Result<ModpackSelection> {
     let mut selection = ModpackSelection::default();
     let mut stack = Vec::new();
     let mut visited = HashSet::new();
     collect_modpack_tree(
         root_modpack,
-        modpacks_folder,
+        sources,
         &mut stack,
         &mut visited,
         &mut selection,
+        ignored,
     )?;
 
     Ok(selection)
@@ -98,10 +198,11 @@ fn collect_modpack_selection(
 
 fn collect_modpack_tree(
     modpack_path: &Path,
-    modpacks_folder: &Path,
+    sources: &SourcePaths<'_>,
     stack: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
     selection: &mut ModpackSelection,
+    ignored: &mut Exclusions,
 ) -> Result<()> {
     let modpack_path = modpack_path
         .canonicalize()
@@ -120,15 +221,30 @@ fn collect_modpack_tree(
     stack.push(modpack_path.clone());
     let modpack = read_modpack(&modpack_path)?;
 
+    for excluded in &modpack.ignore {
+        if let Some(id) = excluded.strip_prefix(MODPACK_PREFIX) {
+            validate_modpack_id(id)?;
+        } else {
+            validate_mod_name(excluded, "modpack ignore list")?;
+        }
+        ignored.insert(excluded.clone());
+    }
+
     for child_id in &modpack.modpacks {
-        let child_path = resolve_modpack_id(child_id, modpacks_folder)?;
-        collect_modpack_tree(&child_path, modpacks_folder, stack, visited, selection)?;
+        if ignored.contains(&format!("{MODPACK_PREFIX}{child_id}")) {
+            continue;
+        }
+        let child_path = sources.modpack_path(child_id)?;
+        collect_modpack_tree(&child_path, sources, stack, visited, selection, ignored)?;
     }
 
     for mod_name in &modpack.mods {
         if let Some(modpack_id) = mod_name.strip_prefix(MODPACK_PREFIX) {
-            let child_path = resolve_modpack_id(modpack_id, modpacks_folder)?;
-            collect_modpack_tree(&child_path, modpacks_folder, stack, visited, selection)?;
+            if ignored.contains(mod_name) {
+                continue;
+            }
+            let child_path = sources.modpack_path(modpack_id)?;
+            collect_modpack_tree(&child_path, sources, stack, visited, selection, ignored)?;
             continue;
         }
 
@@ -138,11 +254,6 @@ fn collect_modpack_tree(
         }
     }
 
-    for ignored_mod in &modpack.ignore {
-        validate_mod_name(ignored_mod, "modpack ignore list")?;
-        selection.ignore.insert(ignored_mod.clone());
-    }
-
     stack.pop();
     visited.insert(modpack_path);
     Ok(())
@@ -150,28 +261,18 @@ fn collect_modpack_tree(
 
 fn expand_dependencies(
     dependencies: &mut Dependencies,
-    modpacks_folder: &Path,
-    ignored: &mut HashSet<String>,
+    sources: &SourcePaths<'_>,
+    ignored: &mut Exclusions,
     selected: &mut Vec<String>,
     selected_set: &mut HashSet<String>,
 ) -> Result<()> {
-    dependencies.init = expand_dependency_list(
-        &dependencies.init,
-        modpacks_folder,
-        ignored,
-        selected,
-        selected_set,
-    )?;
-    dependencies.run = expand_dependency_list(
-        &dependencies.run,
-        modpacks_folder,
-        ignored,
-        selected,
-        selected_set,
-    )?;
+    dependencies.init =
+        expand_dependency_list(&dependencies.init, sources, ignored, selected, selected_set)?;
+    dependencies.run =
+        expand_dependency_list(&dependencies.run, sources, ignored, selected, selected_set)?;
     dependencies.ownership = expand_dependency_list(
         &dependencies.ownership,
-        modpacks_folder,
+        sources,
         ignored,
         selected,
         selected_set,
@@ -182,8 +283,8 @@ fn expand_dependencies(
 
 fn expand_dependency_list(
     dependencies: &[String],
-    modpacks_folder: &Path,
-    ignored: &mut HashSet<String>,
+    sources: &SourcePaths<'_>,
+    ignored: &mut Exclusions,
     selected: &mut Vec<String>,
     selected_set: &mut HashSet<String>,
 ) -> Result<Vec<String>> {
@@ -191,13 +292,8 @@ fn expand_dependency_list(
 
     for dependency in dependencies {
         if dependency.starts_with(MODPACK_PREFIX) {
-            let mods = expand_modpack_reference(
-                dependency,
-                modpacks_folder,
-                ignored,
-                selected,
-                selected_set,
-            )?;
+            let mods =
+                expand_modpack_reference(dependency, sources, ignored, selected, selected_set)?;
             expanded.extend(mods);
         } else if !is_generated_mod_id(dependency) {
             select_mod(dependency, ignored, selected, selected_set);
@@ -210,7 +306,7 @@ fn expand_dependency_list(
 
 fn select_mod(
     mod_name: &str,
-    ignored: &HashSet<String>,
+    ignored: &Exclusions,
     selected: &mut Vec<String>,
     selected_set: &mut HashSet<String>,
 ) {
@@ -224,8 +320,8 @@ fn select_mod(
 
 fn expand_modpack_reference(
     reference: &str,
-    modpacks_folder: &Path,
-    ignored: &mut HashSet<String>,
+    sources: &SourcePaths<'_>,
+    ignored: &mut Exclusions,
     selected: &mut Vec<String>,
     selected_set: &mut HashSet<String>,
 ) -> Result<Vec<String>> {
@@ -236,10 +332,12 @@ fn expand_modpack_reference(
                 id: reference.to_string(),
                 reason: "modpack references must use the 'modpack/' prefix",
             })?;
-    let modpack_path = resolve_modpack_id(modpack_id, modpacks_folder)?;
-    let dependency_selection = collect_modpack_selection(&modpack_path, modpacks_folder)?;
-
-    ignored.extend(dependency_selection.ignore);
+    validate_modpack_id(modpack_id)?;
+    if ignored.contains(reference) {
+        return Ok(Vec::new());
+    }
+    let modpack_path = sources.modpack_path(modpack_id)?;
+    let dependency_selection = collect_modpack_selection(&modpack_path, sources, ignored)?;
 
     let mut expanded = Vec::new();
     for mod_name in dependency_selection.mods {
@@ -248,8 +346,6 @@ fn expand_modpack_reference(
         }
 
         if ignored.contains(&mod_name) {
-            selected_set.remove(&mod_name);
-            selected.retain(|selected_mod| selected_mod != &mod_name);
             continue;
         }
 
@@ -263,12 +359,7 @@ fn expand_modpack_reference(
 }
 
 fn resolve_modpack_id(modpack_id: &str, modpacks_folder: &Path) -> Result<PathBuf> {
-    if modpack_id.contains('/') || modpack_id.contains('\\') {
-        return Err(PatchworkError::InvalidModpackId {
-            id: modpack_id.to_string(),
-            reason: "path separators are not allowed",
-        });
-    }
+    validate_modpack_id(modpack_id)?;
 
     let candidate = modpacks_folder.join(modpack_id);
     if candidate.exists() {
@@ -290,15 +381,26 @@ fn resolve_modpack_id(modpack_id: &str, modpacks_folder: &Path) -> Result<PathBu
     })
 }
 
+fn validate_modpack_id(modpack_id: &str) -> Result<()> {
+    if modpack_id.contains('/') || modpack_id.contains('\\') {
+        return Err(PatchworkError::InvalidModpackId {
+            id: modpack_id.to_string(),
+            reason: "path separators are not allowed",
+        });
+    }
+
+    Ok(())
+}
+
 fn read_modpack(path: &Path) -> Result<Modpack> {
     let source = fs::read_to_string(path)
         .map_err(|source| PatchworkError::io("read modpack", path, source))?;
     toml::from_str(&source).map_err(|source| PatchworkError::parse_toml("modpack", path, source))
 }
 
-fn read_mod_info(mods_folder: &Path, mod_name: &str) -> Result<ModInfo> {
+fn read_mod_info(sources: &SourcePaths<'_>, mod_name: &str) -> Result<ModInfo> {
     validate_mod_name(mod_name, "selected mod list")?;
-    let manifest_path = mods_folder.join(mod_name).join("Cargo.toml");
+    let manifest_path = sources.mod_manifest(mod_name);
 
     if !manifest_path.exists() {
         return Err(PatchworkError::MissingModManifest {

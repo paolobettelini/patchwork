@@ -27,6 +27,7 @@ The default data root follows the platform local-data directory. Typical roots a
   profiles/
     .patchwork/
       <profile-id>.origin.json
+      <profile-id>.development.toml
   target/
 ```
 
@@ -46,6 +47,10 @@ The default data root follows the platform local-data directory. Typical roots a
 - `profiles/.patchwork/*.origin.json` records whether a profile created through
   Browse came from a remote publication or a configured local registry. It is
   launcher metadata, not part of the modpack format.
+- `profiles/.patchwork/*.development.toml` explicitly links local mod/modpack
+  sources and Git-library checkouts to one profile. This is private launcher
+  configuration, not imported from downloaded modpacks. See
+  [Local development](./local_development.md).
 - `target` is the launcher's default Cargo target directory for composed
   projects. The Installation settings may point Cargo elsewhere.
 
@@ -117,6 +122,20 @@ the selected debug/release option. Both the ordinary and authenticated
 executable launch paths receive the same custom run arguments and environment.
 Imported dependency modpacks do not contribute options; only the root profile
 does.
+
+The separate **Local development** tab stores its settings apart from these process
+options. The profile Dependencies view includes a searchable flattened list of
+nested mods and modpacks, with required-by information and enabled/disabled
+filters. A Modpacks/Mods selector defaults to Modpacks; both kinds can be
+excluded in the profile manager. Expanded rows retain their state during
+dependency toggles. Browse reruns the current query after source-setting changes,
+when revisited, and after downloads finish. Profile update checks are refreshed
+after source changes and downloads, with stale asynchronous responses discarded.
+The Servers navigation tab is currently an empty placeholder, also available on
+the website at `/servers` (under the configured base path).
+Exclusions are written to the root profile, never into downloaded child
+modpacks. A disabled required dependency remains a composition error; disabling
+is not an instruction to remove arbitrary Rust dependency edges.
 
 The gear beside the primary action configures an ordered checkbox pipeline:
 **Download**, **Compose**, **Build**. All three default to enabled. Enabling a

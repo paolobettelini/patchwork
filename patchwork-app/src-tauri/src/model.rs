@@ -349,6 +349,7 @@ pub(crate) struct SelectedIconFile {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LauncherDependencyPage {
+    pub(crate) profile_id: Option<String>,
     pub(crate) kind: String,
     pub(crate) id: String,
     pub(crate) name: String,

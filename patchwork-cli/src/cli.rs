@@ -31,5 +31,13 @@ pub enum Commands {
         /// Project name
         #[arg(long)]
         name: Option<String>,
+
+        /// Explicit local development configuration (paths are relative to this file)
+        #[arg(long)]
+        development: Option<PathBuf>,
+
+        /// Exclude mod IDs or modpack/IDs, including nested imports
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        ignore: Vec<String>,
     },
 }

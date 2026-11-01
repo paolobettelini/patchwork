@@ -3,9 +3,9 @@ use crate::{
     model::{DependencyPage, LauncherModpack, PatchworkTaskStatus},
     tauri_bridge::{
         create_modpack, delete_modpack, download_profile_updates, import_modpack, list_modpacks,
-        listen_patchwork_console, load_dependency_page, patchwork_task_status, refresh_profile,
-        select_icon_file, select_modpack_icon, start_patchwork_action, stop_patchwork_action,
-        update_profile_metadata,
+        listen_patchwork_console, load_dependency_page, load_dependency_page_for_profile,
+        patchwork_task_status, refresh_profile, select_icon_file, select_modpack_icon,
+        start_patchwork_action, stop_patchwork_action, update_profile_metadata,
     },
     terminal::ConsoleTerminal,
 };
@@ -15,6 +15,7 @@ use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 
 mod dependencies;
 mod details;
+mod development;
 mod options;
 mod sidebar;
 
@@ -109,24 +110,63 @@ pub(crate) fn HomePage(
         set_patchwork_action_error,
     );
 
+    let profile_load_generation = RwSignal::new(0_u64);
+    let live_sources = expect_context::<crate::app::LiveSources>();
+    let last_loaded_profile = RwSignal::new(None::<String>);
+    let selected_profile_id = Memo::new(move |_| selected().map(|profile| profile.id));
     Effect::new(move |_| {
-        if let Some(modpack) = selected() {
+        let selected = selected_profile_id.get();
+        live_sources.revision.get();
+        profile_load_generation.update(|value| *value += 1);
+        let request = profile_load_generation.get_untracked();
+        let changed = last_loaded_profile.get_untracked() != selected;
+        if !changed && live_sources.downloading.get_untracked() {
+            return;
+        }
+        last_loaded_profile.set(selected.clone());
+        let previous = dependency_page.get_untracked();
+        if changed {
             set_navigation_history.set(Vec::new());
-            load_page(
-                "profile".to_string(),
-                modpack.id,
-                set_dependency_page,
-                set_dependency_error,
-            );
-        } else {
             set_dependency_page.set(None);
         }
+        set_dependency_error.set(None);
+        if let Some(profile_id) = selected {
+            leptos::task::spawn_local(async move {
+                let result = if !changed {
+                    if let Some(ref page) = previous {
+                        crate::tauri_bridge::load_dependency_page_for_profile(
+                            &page.kind,
+                            &page.id,
+                            &profile_id,
+                        )
+                        .await
+                    } else {
+                        load_dependency_page("profile", &profile_id).await
+                    }
+                } else {
+                    load_dependency_page("profile", &profile_id).await
+                };
+                if profile_load_generation.try_get_untracked() != Some(request) {
+                    return;
+                }
+                if !changed && dependency_page.get_untracked() != previous {
+                    return;
+                }
+                match result {
+                    Ok(page) => set_dependency_page.set(Some(page)),
+                    Err(error) => set_dependency_error.set(Some(js_error_to_string(error))),
+                }
+            });
+        }
+    });
+    on_cleanup(move || {
+        profile_load_generation.try_update(|value| *value += 1);
     });
 
     Effect::new(move |_| {
         let page = dependency_page.get();
         if !page.as_ref().is_some_and(|page| page.editable_profile)
-            && active_detail_tab.get_untracked() == "options"
+            && matches!(active_detail_tab.get_untracked(), "options" | "development")
         {
             set_active_detail_tab.set("details");
         }
@@ -246,6 +286,7 @@ pub(crate) fn HomePage(
                                                     go_back(
                                                         navigation_history,
                                                         set_navigation_history,
+                                                        dependency_page,
                                                         set_dependency_page,
                                                         set_dependency_error,
                                                     );
@@ -426,11 +467,12 @@ pub(crate) fn HomePage(
                                                         class="profile-refresh-action"
                                                         title="Refresh profile"
                                                         aria-label="Refresh profile"
-                                                        disabled=move || profile_refresh_pending.get() || task_running.get()
+                                                        disabled=move || profile_refresh_pending.get() || task_running.get() || live_sources.downloading.get()
                                                         on:click=move |_| {
                                                             if let Some(page) = dependency_page.get().filter(|page| page.editable_profile) {
                                                                 refresh_selected_profile(
                                                                     page.id,
+                                                                    dependency_page,
                                                                     set_modpacks,
                                                                     set_dependency_page,
                                                                     set_profile_refresh_pending,
@@ -451,11 +493,12 @@ pub(crate) fn HomePage(
                                                         <button
                                                             type="button"
                                                             class="profile-update-action"
-                                                            disabled=move || profile_refresh_pending.get() || task_running.get()
+                                                            disabled=move || profile_refresh_pending.get() || task_running.get() || live_sources.downloading.get()
                                                             on:click=move |_| {
                                                                 if let Some(page) = dependency_page.get().filter(|page| page.editable_profile) {
                                                                     download_selected_profile_updates(
                                                                         page.id,
+                                                                        dependency_page,
                                                                         set_modpacks,
                                                                         set_dependency_page,
                                                                         set_profile_refresh_pending,
@@ -672,7 +715,7 @@ pub(crate) fn HomePage(
                         </div>
                     </section>
 
-                    <section class="dependency-workspace">
+                    <section class="dependency-workspace" class:dependency-workspace-managed=move || active_detail_tab.get() == "dependencies" && dependency_page.get().is_some_and(|p| p.editable_profile)>
                         <div class="detail-tabs" aria-label="Modpack detail tabs">
                             <button
                                 type="button"
@@ -703,6 +746,7 @@ pub(crate) fn HomePage(
                                 >
                                     "Options"
                                 </button>
+                                <button type="button" class=move || detail_tab_class(active_detail_tab.get() == "development") on:click=move |_| set_active_detail_tab.set("development")>"Local development"</button>
                             </Show>
                         </div>
 
@@ -723,6 +767,7 @@ pub(crate) fn HomePage(
                             }.into_any(),
                             "console" => view! { <ConsoleTerminal dependency_page build_mode /> }.into_any(),
                             "options" => view! { <OptionsPanel page=dependency_page build_mode /> }.into_any(),
+                            "development" => view! { <development::DevelopmentEditor page=dependency_page set_page=set_dependency_page /> }.into_any(),
                             _ => view! {
                                 <DetailsPanel page=dependency_page on_open_publisher />
                             }.into_any(),
@@ -1063,28 +1108,38 @@ fn handle_inline_edit_keydown(event: web_sys::KeyboardEvent, set_editing: WriteS
     }
 }
 
-fn load_page(
-    kind: String,
-    id: String,
-    set_page: WriteSignal<Option<DependencyPage>>,
-    set_error: WriteSignal<Option<String>>,
-) {
-    leptos::task::spawn_local(async move {
-        load_dependency_page_into(kind, id, set_page, set_error).await;
-    });
-}
-
 fn go_back(
     history: ReadSignal<Vec<(String, String)>>,
     set_history: WriteSignal<Vec<(String, String)>>,
+    current_page: ReadSignal<Option<DependencyPage>>,
     set_page: WriteSignal<Option<DependencyPage>>,
     set_error: WriteSignal<Option<String>>,
 ) {
-    if let Some((kind, id)) = history.get().last().cloned() {
-        set_history.update(|history| {
-            history.pop();
+    let previous = current_page.get_untracked();
+    let previous_history = history.get_untracked();
+    let root = previous.as_ref().and_then(|page| page.profile_id.clone());
+    if let Some((kind, id)) = previous_history.last().cloned() {
+        leptos::task::spawn_local(async move {
+            let result = match root {
+                Some(root) => load_dependency_page_for_profile(&kind, &id, &root).await,
+                None => load_dependency_page(&kind, &id).await,
+            };
+            if current_page.try_get_untracked() != Some(previous)
+                || history.try_get_untracked() != Some(previous_history)
+            {
+                return;
+            }
+            match result {
+                Ok(page) => {
+                    set_history.update(|history| {
+                        history.pop();
+                    });
+                    set_error.set(None);
+                    set_page.set(Some(page));
+                }
+                Err(error) => set_error.set(Some(js_error_to_string(error))),
+            }
         });
-        load_page(kind, id, set_page, set_error);
     }
 }
 
@@ -1271,6 +1326,7 @@ fn current_profile_updates(
 
 fn refresh_selected_profile(
     profile_id: String,
+    current_page: ReadSignal<Option<DependencyPage>>,
     set_modpacks: WriteSignal<Vec<LauncherModpack>>,
     set_dependency_page: WriteSignal<Option<DependencyPage>>,
     set_pending: WriteSignal<bool>,
@@ -1283,10 +1339,22 @@ fn refresh_selected_profile(
             Ok(profile) => {
                 replace_launcher_profile(set_modpacks, profile);
                 if let Ok(page) = load_dependency_page("profile", &profile_id).await {
-                    set_dependency_page.set(Some(page));
+                    if current_page
+                        .get_untracked()
+                        .is_some_and(|p| p.editable_profile && p.id == profile_id)
+                    {
+                        set_dependency_page.set(Some(page));
+                    }
                 }
             }
-            Err(error) => set_error.set(Some(js_error_to_string(error))),
+            Err(error) => {
+                if current_page
+                    .get_untracked()
+                    .is_some_and(|p| p.editable_profile && p.id == profile_id)
+                {
+                    set_error.set(Some(js_error_to_string(error)));
+                }
+            }
         }
         set_pending.set(false);
     });
@@ -1294,6 +1362,7 @@ fn refresh_selected_profile(
 
 fn download_selected_profile_updates(
     profile_id: String,
+    current_page: ReadSignal<Option<DependencyPage>>,
     set_modpacks: WriteSignal<Vec<LauncherModpack>>,
     set_dependency_page: WriteSignal<Option<DependencyPage>>,
     set_pending: WriteSignal<bool>,
@@ -1305,17 +1374,33 @@ fn download_selected_profile_updates(
         match download_profile_updates(&profile_id).await {
             Ok(result) => {
                 replace_launcher_profile(set_modpacks, result.profile);
-                if !result.report.errors.is_empty() {
+                if !result.report.errors.is_empty()
+                    && current_page
+                        .get_untracked()
+                        .is_some_and(|p| p.editable_profile && p.id == profile_id)
+                {
                     set_error.set(Some(format!(
                         "Some updates could not be downloaded:\n{}",
                         result.report.errors.join("\n")
                     )));
                 }
                 if let Ok(page) = load_dependency_page("profile", &profile_id).await {
-                    set_dependency_page.set(Some(page));
+                    if current_page
+                        .get_untracked()
+                        .is_some_and(|p| p.editable_profile && p.id == profile_id)
+                    {
+                        set_dependency_page.set(Some(page));
+                    }
                 }
             }
-            Err(error) => set_error.set(Some(js_error_to_string(error))),
+            Err(error) => {
+                if current_page
+                    .get_untracked()
+                    .is_some_and(|p| p.editable_profile && p.id == profile_id)
+                {
+                    set_error.set(Some(js_error_to_string(error)));
+                }
+            }
         }
         set_pending.set(false);
     });

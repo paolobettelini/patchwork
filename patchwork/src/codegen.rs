@@ -116,6 +116,11 @@ pub fn run_tasks(
             .current_dir(mods_folder)
             .arg("run");
         command.args(&cargo_arguments);
+        if crate::development::cargo_config(mods_folder)?.is_some() {
+            command
+                .arg("--config")
+                .arg(mods_folder.join(".cargo/config.toml"));
+        }
         command.envs(&build_options.env);
         command.env("CARGO_TERM_COLOR", "always");
         for (key, value) in cargo_environment {

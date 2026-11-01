@@ -1,7 +1,7 @@
 use crate::codegen;
 use crate::error::{PatchworkError, Result};
 use crate::model::ModInfo;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +54,15 @@ pub fn create_project(
         )
     })?;
     copy_project_assets(&project_dir, mods_folder, &mods)?;
+    let development_config = crate::development::cargo_config(mods_folder)?;
+    if let Some(config) = &development_config {
+        let directory = project_dir.join(".cargo");
+        fs::create_dir_all(&directory).map_err(|e| {
+            PatchworkError::io("create development Cargo config directory", &directory, e)
+        })?;
+        fs::write(directory.join("config.toml"), config)
+            .map_err(|e| PatchworkError::io("write development Cargo config", &directory, e))?;
+    }
 
     let dependencies = mods
         .iter()
@@ -69,13 +78,18 @@ pub fn create_project(
         .collect::<Result<Vec<_>>>()?
         .join("\n");
 
-    let git_patches = generate_git_source_patches(mods_folder, &mods)?;
+    let git_patches = match &development_config {
+        // Also embed patches for cargo --manifest-path run outside the project directory.
+        Some(config) => config.clone(),
+        None => generate_git_source_patches(mods_folder, &mods)?,
+    };
     let cargo_toml = CARGO_TOML_TEMPLATE
         .replace("#PLACEHOLDER", &dependencies)
         .replace(
             "name = \"template\"",
             &format!("name = \"{}\"", project_name),
         )
+        + "\n"
         + &git_patches;
 
     fs::write(project_dir.join("Cargo.toml"), cargo_toml).map_err(|source| {
@@ -159,7 +173,12 @@ pub fn create_project(
         )
     })?;
 
-    let codegen_tasks = codegen::resolve_tasks(cache_folder, mods_folder, &mods)?;
+    let generated_cache = if development_config.is_some() {
+        cache_folder.join(".generated").join(project_name)
+    } else {
+        cache_folder.to_path_buf()
+    };
+    let codegen_tasks = codegen::resolve_tasks(&generated_cache, mods_folder, &mods)?;
     codegen::run_tasks(
         &project_dir,
         mods_folder,
@@ -198,7 +217,7 @@ fn cargo_path_string(path: &Path) -> String {
 }
 
 fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -> Result<String> {
-    let mut git_sources = BTreeSet::new();
+    let mut git_sources = BTreeMap::new();
     for (mod_name, _) in mods {
         let manifest_path = mods_folder.join(mod_name).join("Cargo.toml");
         let source = fs::read_to_string(&manifest_path).map_err(|source| {
@@ -218,43 +237,55 @@ fn generate_git_source_patches(mods_folder: &Path, mods: &[(String, ModInfo)]) -
         return Ok(String::new());
     }
 
-    let patch_lines = mods
-        .iter()
-        .map(|(mod_name, _)| {
-            let mod_path = mods_folder.join(mod_name);
-            let mod_path =
-                canonical_cargo_path(&mod_path, "canonicalize selected mod path for Git patches")?;
-            Ok(format!(
-                "{} = {{ path = {} }}",
-                toml_string(mod_name),
-                toml_string(&mod_path)
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("\n");
-
-    Ok(git_sources
-        .into_iter()
-        .map(|source| format!("\n[patch.{}]\n{patch_lines}\n", toml_string(&source)))
-        .collect())
+    let mut output = String::new();
+    for (source, packages) in git_sources {
+        let mut lines = Vec::new();
+        for (mod_name, _) in mods {
+            if packages.contains(mod_name) {
+                let path =
+                    canonical_cargo_path(&mods_folder.join(mod_name), "canonicalize Git patch")?;
+                lines.push(format!(
+                    "{} = {{ path = {} }}",
+                    toml_string(mod_name),
+                    toml_string(&path)
+                ));
+            }
+        }
+        if !lines.is_empty() {
+            output.push_str(&format!(
+                "\n[patch.{}]\n{}\n",
+                toml_string(&source),
+                lines.join("\n")
+            ));
+        }
+    }
+    Ok(output)
 }
 
-fn collect_git_sources(value: &toml::Value, sources: &mut BTreeSet<String>) {
-    match value {
-        toml::Value::Table(table) => {
-            if let Some(source) = table.get("git").and_then(toml::Value::as_str) {
-                sources.insert(source.to_owned());
-            }
-            for value in table.values() {
-                collect_git_sources(value, sources);
+fn collect_git_sources(
+    value: &toml::Value,
+    sources: &mut BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        if let Some(table) = value.get(section).and_then(toml::Value::as_table) {
+            for (alias, dep) in table {
+                if let Some(git) = dep.get("git").and_then(toml::Value::as_str) {
+                    let package = dep
+                        .get("package")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or(alias);
+                    sources
+                        .entry(git.to_owned())
+                        .or_default()
+                        .insert(package.to_owned());
+                }
             }
         }
-        toml::Value::Array(values) => {
-            for value in values {
-                collect_git_sources(value, sources);
-            }
+    }
+    if let Some(targets) = value.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            collect_git_sources(target, sources);
         }
-        _ => {}
     }
 }
 

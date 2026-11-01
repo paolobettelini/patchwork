@@ -88,6 +88,7 @@ struct Candidate {
     key: ProjectKey,
     version: String,
     dependencies: Vec<ProjectKey>,
+    exclusions: Vec<ProjectKey>,
     source: CandidateSource,
 }
 
@@ -153,14 +154,21 @@ pub(crate) fn profile_roots(
             project_kind: RegistryProjectKind::Modpack,
             project_id: id,
         })
+        .filter(|project| !ignored.contains(&format!("modpack/{}", project.project_id)))
         .chain(
             profile
                 .mods
                 .into_iter()
                 .filter(|id| !ignored.contains(id))
-                .map(|id| RegistryProjectRef {
-                    project_kind: RegistryProjectKind::Mod,
-                    project_id: id,
+                .map(|id| match id.strip_prefix("modpack/") {
+                    Some(pack) => RegistryProjectRef {
+                        project_kind: RegistryProjectKind::Modpack,
+                        project_id: pack.to_owned(),
+                    },
+                    None => RegistryProjectRef {
+                        project_kind: RegistryProjectKind::Mod,
+                        project_id: id,
+                    },
                 }),
         )
         .collect())
@@ -186,6 +194,7 @@ pub(crate) fn install_profile_dependencies(
             InstallMode::Missing
         },
         true,
+        Some(profile_id),
     )
 }
 
@@ -195,6 +204,7 @@ pub(crate) fn install_selected_project(
     download_running: &AtomicBool,
     project: RegistryProjectRef,
     selected: Option<RegistryBrowseProject>,
+    profile_id: &str,
 ) -> Result<RegistryInstallReport, String> {
     install_projects(
         app,
@@ -204,6 +214,7 @@ pub(crate) fn install_selected_project(
         selected.into_iter().collect(),
         InstallMode::Missing,
         true,
+        Some(profile_id),
     )
 }
 
@@ -222,6 +233,7 @@ pub(crate) fn install_selected_project_root(
         vec![selected],
         InstallMode::Updates,
         false,
+        None,
     )
 }
 
@@ -231,6 +243,7 @@ pub(crate) fn check_profile_updates(
 ) -> Result<(usize, Vec<String>), String> {
     let roots = profile_roots(settings, profile_id)?;
     let mut installer = Installer::new(settings, Vec::new())?;
+    installer.with_profile(profile_id)?;
     let report = installer.process(None, roots, InstallMode::CheckUpdates, true);
     Ok((report.installed, report.errors))
 }
@@ -243,6 +256,7 @@ fn install_projects(
     selected: Vec<RegistryBrowseProject>,
     mode: InstallMode,
     traverse_dependencies: bool,
+    profile_id: Option<&str>,
 ) -> Result<RegistryInstallReport, String> {
     ensure_settings_dirs(settings).map_err(|error| error.to_string())?;
     let _guard = DownloadGuard::acquire(download_running)?;
@@ -264,6 +278,9 @@ fn install_projects(
         Vec::new(),
     );
     let mut installer = Installer::new(settings, selected)?;
+    if let Some(profile_id) = profile_id {
+        installer.with_profile(profile_id)?;
+    }
     let report = installer.process(Some(app), roots, mode, traverse_dependencies);
     emit_progress(
         app,
@@ -287,6 +304,8 @@ struct Installer<'a> {
     local: HashMap<ProjectKey, LocalCandidate>,
     selected: HashMap<ProjectKey, RegistryBrowseProject>,
     remote: HashMap<ProjectKey, RegistryProjectDetails>,
+    development: patchwork::DevelopmentConfig,
+    ignored: HashSet<ProjectKey>,
 }
 
 impl<'a> Installer<'a> {
@@ -331,7 +350,25 @@ impl<'a> Installer<'a> {
             local,
             selected,
             remote: HashMap::new(),
+            development: Default::default(),
+            ignored: HashSet::new(),
         })
+    }
+
+    fn with_profile(&mut self, profile_id: &str) -> Result<(), String> {
+        self.development = crate::development::resolved_config(self.settings, profile_id)?;
+        let path = Path::new(&self.settings.profiles_dir).join(format!("{profile_id}.toml"));
+        let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let profile: patchwork::Modpack =
+            toml::from_str(&source).map_err(|error| error.to_string())?;
+        for id in profile.ignore {
+            let (kind, id) = match id.strip_prefix("modpack/") {
+                Some(id) => (RegistryProjectKind::Modpack, id.to_owned()),
+                None => (RegistryProjectKind::Mod, id),
+            };
+            self.ignored.insert(ProjectKey::new(kind, id));
+        }
+        Ok(())
     }
 
     fn process(
@@ -370,16 +407,22 @@ impl<'a> Installer<'a> {
         let mut report = RegistryInstallReport::default();
         let mut candidates = Vec::new();
         let mut scheduled = HashSet::new();
-        let mut queue = roots
+        let root_keys = roots
             .into_iter()
             .map(|project| ProjectKey::new(project.project_kind, project.project_id))
+            .collect::<Vec<_>>();
+        let mut queue = root_keys
+            .iter()
+            .cloned()
             .filter(|project| !project.is_generated_mod())
+            .filter(|project| !self.ignored.contains(project))
             .filter(|project| scheduled.insert(project.clone()))
             .collect::<VecDeque<_>>();
         let mut visited = HashSet::new();
         let mut processed = 0_usize;
+        let mut discovery_errors = Vec::new();
         while let Some(key) = queue.pop_front() {
-            if !visited.insert(key.clone()) {
+            if self.ignored.contains(&key) || !visited.insert(key.clone()) {
                 continue;
             }
             let total = scheduled.len();
@@ -398,7 +441,7 @@ impl<'a> Installer<'a> {
             let candidate = match self.resolve_candidate(&key, mode) {
                 Ok(candidate) => candidate,
                 Err(error) => {
-                    report.errors.push(format!("{}: {error}", key.label()));
+                    discovery_errors.push((key.clone(), format!("{}: {error}", key.label())));
                     processed += 1;
                     if let Some(app) = app {
                         emit_progress(
@@ -415,9 +458,10 @@ impl<'a> Installer<'a> {
                     continue;
                 }
             };
+            self.ignored.extend(candidate.exclusions.iter().cloned());
             if traverse_dependencies {
                 for dependency in &candidate.dependencies {
-                    if dependency.is_generated_mod() {
+                    if dependency.is_generated_mod() || self.ignored.contains(dependency) {
                         continue;
                     }
                     if scheduled.insert(dependency.clone()) {
@@ -440,6 +484,31 @@ impl<'a> Installer<'a> {
                 );
             }
         }
+        // An exclusion discovered later may disconnect an already visited subtree.
+        // Keep shared dependencies only when another active root still reaches them.
+        let by_key = candidates
+            .iter()
+            .map(|candidate| (&candidate.key, candidate))
+            .collect::<HashMap<_, _>>();
+        let mut reachable = HashSet::new();
+        let mut pending = root_keys;
+        while let Some(key) = pending.pop() {
+            if self.ignored.contains(&key) || !reachable.insert(key.clone()) {
+                continue;
+            }
+            if traverse_dependencies {
+                if let Some(candidate) = by_key.get(&key) {
+                    pending.extend(candidate.dependencies.iter().cloned());
+                }
+            }
+        }
+        candidates.retain(|candidate| reachable.contains(&candidate.key));
+        report.errors.extend(
+            discovery_errors
+                .into_iter()
+                .filter(|(key, _)| reachable.contains(key))
+                .map(|(_, message)| message),
+        );
         (candidates, report)
     }
 
@@ -546,6 +615,17 @@ impl<'a> Installer<'a> {
         key: &ProjectKey,
         mode: InstallMode,
     ) -> Result<Candidate, String> {
+        let development_path = match key.kind {
+            RegistryProjectKind::Mod => self
+                .development
+                .mods
+                .get(&key.id)
+                .map(|path| path.join("Cargo.toml")),
+            RegistryProjectKind::Modpack => self.development.modpacks.get(&key.id).cloned(),
+        };
+        if let Some(path) = development_path {
+            return candidate_from_manifest(key, &path);
+        }
         let cached = cached_candidate(self.settings, key).ok();
         if mode == InstallMode::Missing {
             if let Some(cached) = cached {
@@ -575,6 +655,7 @@ impl<'a> Installer<'a> {
                 key: key.clone(),
                 version: local.project.version.clone(),
                 dependencies: local.dependencies.clone(),
+                exclusions: local_exclusions(&local.project)?,
                 source: CandidateSource::Local(local.project.clone()),
             });
         }
@@ -584,6 +665,7 @@ impl<'a> Installer<'a> {
                     key: key.clone(),
                     version: selected.version.clone(),
                     dependencies: local_dependencies(selected, Path::new("."))?,
+                    exclusions: local_exclusions(selected)?,
                     source: CandidateSource::Local(selected.clone()),
                 });
             }
@@ -599,6 +681,14 @@ impl<'a> Installer<'a> {
             key: key.clone(),
             version: details.version.clone(),
             dependencies,
+            exclusions: details
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.kind == RegistryDependencyKind::Ignore)
+                .map(|dependency| {
+                    ProjectKey::new(dependency.target_kind, dependency.target_id.clone())
+                })
+                .collect(),
             source: CandidateSource::Remote(details),
         })
     }
@@ -637,32 +727,38 @@ fn install_candidate(settings: &LauncherSettings, candidate: &Candidate) -> Resu
 }
 
 fn cached_candidate(settings: &LauncherSettings, key: &ProjectKey) -> Result<Candidate, String> {
+    let path = match key.kind {
+        RegistryProjectKind::Mod => Path::new(&settings.mod_cache)
+            .join(&key.id)
+            .join("Cargo.toml"),
+        RegistryProjectKind::Modpack => {
+            Path::new(&settings.modpacks_cache).join(format!("{}.toml", key.id))
+        }
+    };
+    candidate_from_manifest(key, &path)
+}
+
+fn candidate_from_manifest(key: &ProjectKey, manifest_path: &Path) -> Result<Candidate, String> {
     match key.kind {
         RegistryProjectKind::Mod => {
-            let manifest_path = Path::new(&settings.mod_cache)
-                .join(&key.id)
-                .join("Cargo.toml");
             let source = fs::read_to_string(&manifest_path).map_err(|error| error.to_string())?;
-            let manifest = parse_registry_mod_manifest(
-                &source,
-                &manifest_path,
-                &[RegistryWorkspaceManifest {
-                    path: &manifest_path,
-                    source: &source,
-                }],
-            )
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "cached Cargo.toml is not a Patchwork mod".to_owned())?;
+            let owned = workspace_sources(manifest_path, Path::new(""));
+            let workspace = owned
+                .iter()
+                .map(|(path, source)| RegistryWorkspaceManifest { path, source })
+                .collect::<Vec<_>>();
+            let manifest = parse_registry_mod_manifest(&source, &manifest_path, &workspace)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "cached Cargo.toml is not a Patchwork mod".to_owned())?;
             Ok(Candidate {
                 key: key.clone(),
                 version: manifest.version,
                 dependencies: mod_dependencies(&manifest.mod_info, &manifest_path)?,
+                exclusions: Vec::new(),
                 source: CandidateSource::Cached,
             })
         }
         RegistryProjectKind::Modpack => {
-            let manifest_path =
-                Path::new(&settings.modpacks_cache).join(format!("{}.toml", key.id));
             let source = fs::read_to_string(&manifest_path).map_err(|error| error.to_string())?;
             let manifest = parse_registry_modpack_manifest(&source, &manifest_path)
                 .map_err(|error| error.to_string())?
@@ -670,6 +766,17 @@ fn cached_candidate(settings: &LauncherSettings, key: &ProjectKey) -> Result<Can
             Ok(Candidate {
                 key: key.clone(),
                 version: manifest.version,
+                exclusions: manifest
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| dependency.ignored)
+                    .map(|dependency| {
+                        ProjectKey::new(
+                            registry_kind(dependency.target_kind),
+                            dependency.target_id.clone(),
+                        )
+                    })
+                    .collect(),
                 dependencies: manifest
                     .dependencies
                     .into_iter()
@@ -723,6 +830,21 @@ fn local_dependencies(
                 .collect())
         }
     }
+}
+
+fn local_exclusions(project: &RegistryBrowseProject) -> Result<Vec<ProjectKey>, String> {
+    if project.project_kind != RegistryProjectKind::Modpack {
+        return Ok(Vec::new());
+    }
+    let path = project
+        .local_manifest_path
+        .as_ref()
+        .ok_or("local modpack has no manifest path")?;
+    Ok(candidate_from_manifest(
+        &ProjectKey::new(project.project_kind, &project.project_id),
+        Path::new(path),
+    )?
+    .exclusions)
 }
 
 fn workspace_sources(manifest_path: &Path, root: &Path) -> Vec<(PathBuf, String)> {
@@ -1256,6 +1378,140 @@ fn emit_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_checkout_discovers_new_nested_dependencies_before_download() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = LauncherSettings::default_for(root.path());
+        ensure_settings_dirs(&settings).unwrap();
+        let checkout = root.path().join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(
+            Path::new(&settings.profiles_dir).join("demo.toml"),
+            "version='1.0.0'\nmodpacks=['bundle']\n",
+        )
+        .unwrap();
+        let config = patchwork::DevelopmentConfig {
+            enabled: true,
+            checkouts: vec![patchwork::DevelopmentCheckout {
+                path: checkout.clone(),
+                git: String::new(),
+            }],
+            ..Default::default()
+        };
+        let config_path = crate::development::config_path(&settings, "demo").unwrap();
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
+        fs::write(checkout.join("bundle.toml"), "version='1.0.0'\nmods=[]\n").unwrap();
+        let mut first = Installer::new(&settings, Vec::new()).unwrap();
+        first.with_profile("demo").unwrap();
+        assert!(!first.development.mods.contains_key("new-mod"));
+
+        fs::create_dir_all(checkout.join("new-mod/src")).unwrap();
+        fs::write(
+            checkout.join("new-mod/Cargo.toml"),
+            "[package]\nname='new-mod'\nversion='0.1.0'\n[package.metadata.mod]\nsupport=true\n",
+        )
+        .unwrap();
+        fs::write(checkout.join("new-mod/src/lib.rs"), "").unwrap();
+        fs::write(
+            checkout.join("bundle.toml"),
+            "version='1.0.0'\nmods=['new-mod']\n",
+        )
+        .unwrap();
+        let mut next = Installer::new(&settings, Vec::new()).unwrap();
+        next.with_profile("demo").unwrap();
+        let (candidates, report) = next.discover(
+            None,
+            profile_roots(&settings, "demo").unwrap(),
+            InstallMode::Missing,
+            true,
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| matches!(candidate.source, CandidateSource::Cached))
+        );
+        assert!(!Path::new(&settings.mod_cache).join("new-mod").exists());
+    }
+
+    #[test]
+    fn development_sources_win_over_cached_versions_without_installing() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = LauncherSettings::default_for(root.path());
+        ensure_settings_dirs(&settings).unwrap();
+        let checkout = root.path().join("checkout");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(
+            checkout.join("Cargo.toml"),
+            "[package]\nname='example'\nversion='0.1.0'\n[package.metadata.mod]\nsupport=true\n",
+        )
+        .unwrap();
+        let cached = Path::new(&settings.mod_cache).join("example");
+        fs::create_dir_all(&cached).unwrap();
+        fs::write(
+            cached.join("Cargo.toml"),
+            "[package]\nname='example'\nversion='9.0.0'\n[package.metadata.mod]\nsupport=true\n",
+        )
+        .unwrap();
+        let mut installer = Installer::new(&settings, Vec::new()).unwrap();
+        installer.development.enabled = true;
+        installer
+            .development
+            .mods
+            .insert("example".into(), checkout.clone());
+        for mode in [
+            InstallMode::Missing,
+            InstallMode::Updates,
+            InstallMode::CheckUpdates,
+        ] {
+            let candidate = installer
+                .resolve_candidate(&ProjectKey::new(RegistryProjectKind::Mod, "example"), mode)
+                .unwrap();
+            assert_eq!(candidate.version, "0.1.0");
+            assert!(matches!(candidate.source, CandidateSource::Cached));
+        }
+        assert!(
+            fs::read_to_string(cached.join("Cargo.toml"))
+                .unwrap()
+                .contains("9.0.0")
+        );
+        fs::remove_file(checkout.join("Cargo.toml")).unwrap();
+        assert!(
+            installer
+                .resolve_candidate(
+                    &ProjectKey::new(RegistryProjectKind::Mod, "example"),
+                    InstallMode::Missing
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn profile_exclusions_apply_to_nested_download_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = LauncherSettings::default_for(root.path());
+        ensure_settings_dirs(&settings).unwrap();
+        fs::write(
+            Path::new(&settings.profiles_dir).join("demo.toml"),
+            "version='1.0.0'\nmodpacks=['bundle']\nignore=['absent','modpack/absent-pack']\n",
+        )
+        .unwrap();
+        fs::write(
+            Path::new(&settings.modpacks_cache).join("bundle.toml"),
+            "version='1.0.0'\nmods=['absent']\nmodpacks=['absent-pack']\n",
+        )
+        .unwrap();
+        let mut installer = Installer::new(&settings, Vec::new()).unwrap();
+        installer.with_profile("demo").unwrap();
+        let roots = profile_roots(&settings, "demo").unwrap();
+        let (candidates, report) = installer.discover(None, roots, InstallMode::Missing, true);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].key.id, "bundle");
+    }
 
     #[test]
     fn version_comparison_uses_semver() {

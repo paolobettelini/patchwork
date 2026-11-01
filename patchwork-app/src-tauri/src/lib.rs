@@ -37,6 +37,7 @@ mod assets;
 mod auth;
 #[path = "../../shared/remote_cache.rs"]
 mod cache_settings;
+mod development;
 mod installer;
 mod model;
 mod paths;
@@ -505,11 +506,14 @@ fn update_profile_metadata(
         })?;
     }
 
-    let page = patchwork::inspect_dependency_page(
+    let development = development::resolved_config(&settings, &profile_id)?;
+    let page = patchwork::inspect_dependency_page_with_sources(
         patchwork::DependencyTarget::Profile { id: &profile_id },
         Path::new(&settings.mod_cache),
         Path::new(&settings.modpacks_cache),
         Path::new(&settings.profiles_dir),
+        &development.mods,
+        &development.modpacks,
     )
     .map_err(|error| error.to_string())?;
     decorate_dependency_page(page, &settings)
@@ -646,6 +650,10 @@ fn delete_modpack(state: State<AppState>, modpack_id: String) -> Result<(), Stri
     })?;
     remove_existing_icons(profiles_dir, &id).map_err(|error| error.to_string())?;
     registry::remove_profile_origin(&settings, &id)?;
+    let development_path = development::config_path(&settings, &id)?;
+    if development_path.is_file() {
+        fs::remove_file(development_path).map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -654,6 +662,7 @@ async fn load_dependency_page(
     state: State<'_, AppState>,
     kind: String,
     id: String,
+    profile_id: Option<String>,
 ) -> Result<LauncherDependencyPage, String> {
     let settings = state
         .settings
@@ -677,15 +686,26 @@ async fn load_dependency_page(
             "mod" => patchwork::DependencyTarget::Mod { id: &id },
             _ => return Err(format!("Unknown dependency page kind '{kind}'")),
         };
-        let page = patchwork::inspect_dependency_page(
+        let context_id = profile_id
+            .as_deref()
+            .or_else(|| (kind == "profile").then_some(id.as_str()));
+        let development = match context_id {
+            Some(id) => development::resolved_config(&settings, id)?,
+            None => Default::default(),
+        };
+        let page = patchwork::inspect_dependency_page_with_sources(
             target,
             Path::new(&settings.mod_cache),
             Path::new(&settings.modpacks_cache),
             Path::new(&settings.profiles_dir),
+            &development.mods,
+            &development.modpacks,
         )
         .map_err(|error| error.to_string())?;
 
-        decorate_dependency_page(page, &settings)
+        let mut page = decorate_dependency_page_with_development(page, &settings, &development)?;
+        page.profile_id = context_id.map(str::to_owned);
+        Ok(page)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -697,6 +717,10 @@ fn toggle_profile_ignore(
     profile_id: String,
     mod_id: String,
 ) -> Result<LauncherDependencyPage, String> {
+    let tasks = state.tasks.lock().map_err(|_| "task lock poisoned")?;
+    if tasks.get(&profile_id).is_some_and(|task| task.running) {
+        return Err("Stop the profile task before changing dependencies".into());
+    }
     let settings = state
         .settings
         .lock()
@@ -705,7 +729,11 @@ fn toggle_profile_ignore(
     ensure_settings_dirs(&settings).map_err(|error| error.to_string())?;
 
     let profile_id = sanitize_existing_modpack_id(&profile_id)?;
-    let mod_id = sanitize_existing_modpack_id(&mod_id)?;
+    let mod_id = if let Some(id) = mod_id.strip_prefix("modpack/") {
+        format!("modpack/{}", sanitize_existing_modpack_id(id)?)
+    } else {
+        sanitize_existing_modpack_id(&mod_id)?
+    };
     let profile_path = Path::new(&settings.profiles_dir).join(format!("{profile_id}.toml"));
     if !profile_path.is_file() {
         return Err(format!("Profile '{profile_id}' does not exist"));
@@ -717,22 +745,19 @@ fn toggle_profile_ignore(
             profile_path.display()
         )
     })?;
-    let mut profile = toml::from_str::<NewModpackToml>(&source).unwrap_or(NewModpackToml {
-        color: None,
-        name: profile_id.clone(),
-        description: DEFAULT_DESCRIPTION.to_string(),
-        version: "0.1.0".to_owned(),
-        modpacks: Vec::new(),
-        ignore: Vec::new(),
-        mods: Vec::new(),
-        options: patchwork::ProfileOptions::default(),
-    });
-    if let Some(index) = profile.ignore.iter().position(|ignored| ignored == &mod_id) {
-        profile.ignore.remove(index);
+    let mut profile: toml::Table = toml::from_str(&source).map_err(|error| error.to_string())?;
+    let ignored = profile
+        .entry("ignore")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("profile ignore must be an array")?;
+    if let Some(index) = ignored
+        .iter()
+        .position(|ignored| ignored.as_str() == Some(&mod_id))
+    {
+        ignored.remove(index);
     } else {
-        profile.ignore.push(mod_id);
-        profile.ignore.sort();
-        profile.ignore.dedup();
+        ignored.push(toml::Value::String(mod_id));
     }
 
     let toml = toml::to_string_pretty(&profile).map_err(|error| error.to_string())?;
@@ -743,11 +768,14 @@ fn toggle_profile_ignore(
         )
     })?;
 
-    let page = patchwork::inspect_dependency_page(
+    let development = development::resolved_config(&settings, &profile_id)?;
+    let page = patchwork::inspect_dependency_page_with_sources(
         patchwork::DependencyTarget::Profile { id: &profile_id },
         Path::new(&settings.mod_cache),
         Path::new(&settings.modpacks_cache),
         Path::new(&settings.profiles_dir),
+        &development.mods,
+        &development.modpacks,
     )
     .map_err(|error| error.to_string())?;
     decorate_dependency_page(page, &settings)
@@ -1229,6 +1257,11 @@ pub fn run() {
             update_profile_metadata,
             profile_options::load_profile_options,
             profile_options::update_profile_options,
+            development::load_profile_development,
+            development::update_profile_development,
+            development::load_profile_dependencies,
+            development::select_development_modpack_file,
+            development::discover_development_checkout,
             create_modpack,
             import_modpack,
             delete_modpack,
@@ -1464,11 +1497,14 @@ fn read_modpack_file(
         .transpose()?
         .unwrap_or_else(|| "none".to_string());
 
-    let dependency_count = patchwork::inspect_dependency_page(
+    let development = development::resolved_config(settings, &id).unwrap_or_default();
+    let dependency_count = patchwork::inspect_dependency_page_with_sources(
         patchwork::DependencyTarget::Profile { id: &id },
         Path::new(&settings.mod_cache),
         Path::new(&settings.modpacks_cache),
         Path::new(&settings.profiles_dir),
+        &development.mods,
+        &development.modpacks,
     )
     .map(|page| page.distinct_dependency_count)
     .unwrap_or_else(|_| distinct_dependency_count(&parsed.modpacks, &parsed.mods));
@@ -1527,17 +1563,39 @@ fn decorate_dependency_page(
     page: patchwork::DependencyPage,
     settings: &LauncherSettings,
 ) -> Result<LauncherDependencyPage, String> {
-    let (source_kind, registry_details) = dependency_page_source(&page, settings);
+    decorate_dependency_page_with_development(page, settings, &Default::default())
+}
+
+fn decorate_dependency_page_with_development(
+    page: patchwork::DependencyPage,
+    settings: &LauncherSettings,
+    development: &patchwork::DevelopmentConfig,
+) -> Result<LauncherDependencyPage, String> {
+    let local_source = match page.kind {
+        patchwork::DependencyPageKind::Mod => development.mods.get(&page.id),
+        patchwork::DependencyPageKind::Modpack => development.modpacks.get(&page.id),
+        patchwork::DependencyPageKind::Profile => None,
+    };
+    let (source_kind, registry_details) = if local_source.is_some() {
+        ("local-development".into(), None)
+    } else {
+        dependency_page_source(&page, settings)
+    };
     let icon_path = match page.kind {
         patchwork::DependencyPageKind::Profile => matching_icon_for_modpack_file(
             &Path::new(&settings.profiles_dir).join(format!("{}.toml", page.id)),
         )?,
-        patchwork::DependencyPageKind::Modpack => matching_icon_for_modpack_file(
-            &Path::new(&settings.modpacks_cache).join(format!("{}.toml", page.id)),
-        )?,
-        patchwork::DependencyPageKind::Mod => {
-            matching_icon_named(&Path::new(&settings.mod_cache).join(&page.id), "favicon")?
+        patchwork::DependencyPageKind::Modpack => {
+            matching_icon_for_modpack_file(&local_source.cloned().unwrap_or_else(|| {
+                Path::new(&settings.modpacks_cache).join(format!("{}.toml", page.id))
+            }))?
         }
+        patchwork::DependencyPageKind::Mod => matching_icon_named(
+            &local_source
+                .cloned()
+                .unwrap_or_else(|| Path::new(&settings.mod_cache).join(&page.id)),
+            "favicon",
+        )?,
     };
     let icon_data_url = icon_path
         .as_ref()
@@ -1559,6 +1617,8 @@ fn decorate_dependency_page(
     .to_string();
 
     Ok(LauncherDependencyPage {
+        profile_id: matches!(page.kind, patchwork::DependencyPageKind::Profile)
+            .then(|| page.id.clone()),
         kind,
         id: page.id,
         name: page.name,
@@ -1729,6 +1789,47 @@ fn run_patchwork_task(
         }
     }
 
+    let prepared = if matches!(action.as_str(), "compose-build" | "compose" | "build") {
+        emit_console_line(
+            &app,
+            &tasks,
+            &profile_id,
+            &action,
+            "[sources] Preparing profile sources...",
+        );
+        let result = (|| {
+            let config = development::resolved_config(&settings, &profile_id)?;
+            let path = development::config_path(&settings, &profile_id)?;
+            patchwork::prepare_development_for_modpack(
+                &config,
+                path.parent().expect("development config parent"),
+                Path::new(&settings.mod_cache),
+                Path::new(&settings.modpacks_cache),
+                &Path::new(&settings.build_cache)
+                    .join(".development")
+                    .join(&profile_id),
+                &profile_path,
+            )
+            .map_err(|error| error.to_string())
+        })();
+        match result {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                emit_console_line_with_error(
+                    &app,
+                    &tasks,
+                    &profile_id,
+                    &action,
+                    &format!("[sources] Failed: {error}"),
+                    Some(error),
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let cache_session = if matches!(action.as_str(), "compose-build" | "compose" | "build") {
         match remote_cache::CacheSession::start(&app, &settings) {
             Ok(session) => session,
@@ -1782,8 +1883,14 @@ fn run_patchwork_task(
         match patchwork::compose_with_modpacks_with_environment(
             &profile_path,
             Some(profile_id.clone()),
-            Path::new(&settings.mod_cache),
-            Path::new(&settings.modpacks_cache),
+            prepared
+                .as_ref()
+                .map(|sources| sources.mods_folder.as_path())
+                .unwrap_or_else(|| Path::new(&settings.mod_cache)),
+            prepared
+                .as_ref()
+                .map(|sources| sources.modpacks_folder.as_path())
+                .unwrap_or_else(|| Path::new(&settings.modpacks_cache)),
             Path::new(&settings.build_cache),
             &cargo_environment,
             &mut compose_output,

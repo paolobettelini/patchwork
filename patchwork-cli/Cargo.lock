@@ -224,6 +224,7 @@ dependencies = [
  "env_logger",
  "log",
  "patchwork",
+ "toml",
 ]
 
 [[package]]

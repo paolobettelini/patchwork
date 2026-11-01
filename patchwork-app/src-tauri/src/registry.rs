@@ -142,6 +142,7 @@ pub(crate) async fn registry_add_to_profile(
             &download_running,
             input.project,
             input.selected_project,
+            &profile_id,
         )?;
         let profile_path = Path::new(&settings.profiles_dir).join(format!("{profile_id}.toml"));
         let profile =

@@ -31,6 +31,13 @@ use patchwork_ui::{
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use wasm_bindgen_futures::JsFuture;
 
+#[derive(Clone, Copy)]
+pub(crate) struct LiveSources {
+    pub revision: RwSignal<u64>,
+    pub profile_updates_revision: RwSignal<u64>,
+    pub downloading: Memo<bool>,
+}
+
 #[component]
 pub(crate) fn App() -> impl IntoView {
     let (active_tab, set_active_tab) = signal(AppTab::Home);
@@ -62,6 +69,17 @@ pub(crate) fn App() -> impl IntoView {
     let (public_profile_pending, set_public_profile_pending) = signal(false);
     let (public_profile_error, set_public_profile_error) = signal(None::<String>);
     let (download_event, set_download_event) = signal(None::<RegistryDownloadEvent>);
+    let downloading = Memo::new(move |_| download_event.get().is_some_and(|event| event.running));
+    let source_revision = RwSignal::new(0_u64);
+    let profile_updates_revision = RwSignal::new(0_u64);
+    provide_context(LiveSources {
+        revision: source_revision,
+        profile_updates_revision,
+        downloading,
+    });
+    let last_browse_request = RwSignal::new(RegistryBrowseRequest::default());
+    let project_generation = RwSignal::new(0_u64);
+    let publisher_generation = RwSignal::new(0_u64);
 
     let open_registry_project = Callback::new(move |project: RegistryProjectRef| {
         if project.project_kind == RegistryProjectKind::Mod
@@ -73,8 +91,19 @@ pub(crate) fn App() -> impl IntoView {
         set_project_error.set(None);
         set_project_pending.set(true);
         set_active_tab.set(AppTab::Project);
+        project_generation.update(|v| *v += 1);
+        let request = project_generation.get_untracked();
+        let source = settings.get_untracked();
         leptos::task::spawn_local(async move {
-            match registry_project_details(project).await {
+            let result = registry_project_details(project).await;
+            if project_generation.get_untracked() != request {
+                return;
+            }
+            if settings.get_untracked() != source {
+                set_project_pending.set(false);
+                return;
+            }
+            match result {
                 Ok(details) => set_project_details.set(Some(details)),
                 Err(error) => set_project_error.set(Some(js_error_message(error))),
             }
@@ -96,8 +125,19 @@ pub(crate) fn App() -> impl IntoView {
         set_public_profile_error.set(None);
         set_public_profile_pending.set(true);
         set_active_tab.set(AppTab::PublicProfile);
+        publisher_generation.update(|v| *v += 1);
+        let request = publisher_generation.get_untracked();
+        let source = settings.get_untracked();
         leptos::task::spawn_local(async move {
-            match registry_publisher_profile(&nickname).await {
+            let result = registry_publisher_profile(&nickname).await;
+            if publisher_generation.get_untracked() != request {
+                return;
+            }
+            if settings.get_untracked() != source {
+                set_public_profile_pending.set(false);
+                return;
+            }
+            match result {
                 Ok(profile) => set_public_profile.set(Some(profile)),
                 Err(error) => set_public_profile_error.set(Some(js_error_message(error))),
             }
@@ -106,6 +146,7 @@ pub(crate) fn App() -> impl IntoView {
     });
 
     let browse_search = Callback::new(move |input: RegistryBrowseRequest| {
+        last_browse_request.set(input.clone());
         let generation = browse_generation.get_untracked().wrapping_add(1);
         set_browse_generation.set(generation);
         set_browse_pending.set(true);
@@ -122,21 +163,98 @@ pub(crate) fn App() -> impl IntoView {
                     set_browse_results.set(response.projects);
                     set_browse_warnings.set(response.warnings);
                 }
-                Err(error) => set_browse_error.set(Some(js_error_message(error))),
+                Err(error) => {
+                    set_browse_results.set(Vec::new());
+                    set_browse_error.set(Some(js_error_message(error)));
+                }
             }
             set_browse_pending.set(false);
         });
     });
     let backend_changed = Callback::new(move |()| {
+        project_generation.update(|v| *v += 1);
+        publisher_generation.update(|v| *v += 1);
         set_project_details.set(None);
         set_project_error.set(None);
+        set_project_pending.set(false);
         set_public_profile.set(None);
         set_public_profile_error.set(None);
+        set_public_profile_pending.set(false);
         set_registry_scan.set(None);
         set_registry_progress.set(None);
         set_registry_error.set(None);
         set_registry_notice.set(None);
-        browse_search.run(RegistryBrowseRequest::default());
+    });
+    let source_settings = Memo::new(move |_| {
+        settings.get().map(|s| {
+            (
+                s.backend,
+                s.local_folders,
+                s.mod_cache,
+                s.modpacks_cache,
+                s.profiles_dir,
+                s.build_cache,
+            )
+        })
+    });
+    let browse_visible = Memo::new(move |_| active_tab.get() == AppTab::Browse);
+    Effect::new(move |_| {
+        if source_settings.get().is_none() {
+            return;
+        }
+        browse_visible.get();
+        set_browse_generation.update(|v| *v = v.wrapping_add(1));
+        if downloading.get() {
+            set_browse_pending.set(false);
+            return;
+        }
+        browse_search.run(last_browse_request.get_untracked());
+    });
+    let home_visible = Memo::new(move |_| active_tab.get() == AppTab::Home);
+    let profile_ids = Memo::new(move |_| {
+        modpacks
+            .get()
+            .into_iter()
+            .map(|p| (p.id, p.updates_available))
+            .collect::<Vec<_>>()
+    });
+    Effect::new(move |_| {
+        if source_settings.get().is_none() {
+            return;
+        }
+        home_visible.get();
+        downloading.get();
+        source_revision.update(|v| *v += 1);
+    });
+    let profile_refresh_generation = RwSignal::new(0_u64);
+    Effect::new(move |_| {
+        source_revision.get();
+        profile_updates_revision.get();
+        profile_ids.get();
+        if source_settings.get().is_none() {
+            return;
+        }
+        profile_refresh_generation.update(|v| *v += 1);
+        let revision = profile_refresh_generation.get_untracked();
+        if downloading.get() {
+            return;
+        }
+        leptos::task::spawn_local(async move {
+            if let Ok(profiles) = refresh_profiles().await {
+                if profile_refresh_generation.get_untracked() != revision {
+                    return;
+                }
+                let selected_id = modpacks
+                    .get_untracked()
+                    .get(selected_modpack.get_untracked())
+                    .map(|p| p.id.clone());
+                let index = selected_id
+                    .and_then(|id| profiles.iter().position(|p| p.id == id))
+                    .unwrap_or(0);
+                set_modpacks.set(profiles);
+                set_selected_modpack.set(index);
+            }
+        });
     });
     let browse_download_profile = Callback::new(move |project: RegistryBrowseProject| {
         let action_key = format!(
@@ -369,10 +487,6 @@ pub(crate) fn App() -> impl IntoView {
             set_modpacks.set(loaded_modpacks);
         }
 
-        if let Ok(refreshed_modpacks) = refresh_profiles().await {
-            set_modpacks.set(refreshed_modpacks);
-        }
-
         if let Ok(status) = auth_status().await {
             let should_refresh = status.profile.is_some();
             set_auth.set(Some(status));
@@ -438,6 +552,7 @@ pub(crate) fn App() -> impl IntoView {
                     />
                 </section>
 
+                <section class=move || page_class(active_tab.get() == AppTab::Servers) aria-label="Servers"></section>
                 <section class=move || page_class(active_tab.get() == AppTab::Upload)>
                     <UploadPage
                         authenticated=Signal::derive(move || auth.get().and_then(|status| status.profile).is_some())
@@ -569,6 +684,9 @@ fn TopBar(
                     <span>"Browse"</span>
                 </button>
 
+                <button type="button" class=move || top_tab_class(active_tab.get() == AppTab::Servers) on:click=move |_| set_active_tab.set(AppTab::Servers)>
+                    <patchwork_ui::icons::ServersIcon /><span>"Servers"</span>
+                </button>
                 <button
                     type="button"
                     class=move || top_tab_class(active_tab.get() == AppTab::Upload)
