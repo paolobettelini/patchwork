@@ -148,9 +148,15 @@ not make an incompatible library version compatible. Different Git repositories
 can provide different library packages; Patchwork mod IDs themselves remain
 global identities, not repository-scoped names.
 
-Cargo may still fetch Git source metadata during initial dependency resolution,
-even when a local patch supplies the compiled package. This is not a guarantee
-of an offline first build.
+Matching Git dependencies in prepared manifests become direct `path`
+dependencies to the prepared crate. Only the copies change: aliases, package
+names, version requirements, features and optional flags remain intact.
+`git` and its `rev`/`branch`/`tag` selector are removed: an explicit development
+override uses current local contents, not the requested Git revision. Conflicting
+selectors or simultaneous Git/path declarations produce an error.
+Cargo patches remain for transitive dependencies outside the prepared tree.
+Unmatched Git dependencies remain unchanged and may still require network access;
+this is not a guarantee of a fully offline build.
 
 Generated mods remain codegen outputs, not downloadable registry entries. A
 development override must not be used to publish or download generated IDs.

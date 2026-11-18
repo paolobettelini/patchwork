@@ -501,6 +501,21 @@ impl Materializer {
                         )));
                     }
                     if let Some(local) = library.or(local_mod.clone()) {
+                        if path.is_some() {
+                            return Err(invalid(format!(
+                                "dependency '{alias}' in '{name}' declares both git and path"
+                            )));
+                        }
+                        if ["rev", "branch", "tag"]
+                            .iter()
+                            .filter(|key| dependency.contains_key(**key))
+                            .count()
+                            > 1
+                        {
+                            return Err(invalid(format!(
+                                "dependency '{alias}' in '{name}' declares conflicting Git selectors"
+                            )));
+                        }
                         if let Some(requirement) = dependency.get("version").and_then(Value::as_str)
                         {
                             let mut local_manifest = manifest(&local)?;
@@ -532,6 +547,11 @@ impl Materializer {
                         let target =
                             self.package(&local, local_mod.as_ref().map(|_| package.as_str()))?;
                         self.patch(git, &package, &target)?;
+                        // Explicit local overrides replace Git selection only in the prepared copy.
+                        for key in ["git", "rev", "branch", "tag"] {
+                            dependency.remove(key);
+                        }
+                        dependency.insert("path".into(), path_value(&target));
                     }
                 }
                 if let Some(path) = path {
@@ -1396,6 +1416,59 @@ mod tests {
                 .contains("{ 1 }")
         );
         assert!(prepared.cargo_config.unwrap().is_file());
+    }
+
+    #[test]
+    fn prepared_git_library_is_a_path_even_when_remote_does_not_exist() {
+        let f = Fixture::new();
+        f.package("cache/mods/consumer", "consumer", "[dependencies]\nrenamed={git='https://nonexistent.invalid/unpublished.git',package='helper',branch='work',version='0.1',optional=true,default-features=false,features=['extra']}\nother={git='https://other.invalid/repo',rev='123'}\n", true);
+        f.package("local/helper", "helper", "[features]\nextra=[]\n", false);
+        let original = read(&f.path("cache/mods/consumer/Cargo.toml")).unwrap();
+        let mut config = enabled();
+        config.libraries.push(DevelopmentLibrarySource {
+            git: "https://nonexistent.invalid/unpublished.git".into(),
+            path: "local".into(),
+        });
+        let prepared = f.prepare(&config).unwrap();
+        let doc: Value =
+            toml::from_str(&read(&prepared.mods_folder.join("consumer/Cargo.toml")).unwrap())
+                .unwrap();
+        let dependency = &doc["dependencies"]["renamed"];
+        assert!(dependency.get("git").is_none());
+        assert!(dependency.get("branch").is_none());
+        assert!(
+            Path::new(dependency["path"].as_str().unwrap())
+                .join("Cargo.toml")
+                .is_file()
+        );
+        let before: Value = toml::from_str(&original).unwrap();
+        for key in [
+            "package",
+            "version",
+            "optional",
+            "default-features",
+            "features",
+        ] {
+            assert_eq!(dependency[key], before["dependencies"]["renamed"][key]);
+        }
+        assert_eq!(
+            doc["dependencies"]["other"],
+            before["dependencies"]["other"]
+        );
+        assert_eq!(
+            read(&f.path("cache/mods/consumer/Cargo.toml")).unwrap(),
+            original
+        );
+        assert!(
+            read(&prepared.cargo_config.unwrap())
+                .unwrap()
+                .contains("nonexistent.invalid")
+        );
+        config.enabled = false;
+        assert_eq!(
+            f.prepare(&config).unwrap().mods_folder,
+            f.path("cache/mods")
+        );
     }
 
     #[test]
